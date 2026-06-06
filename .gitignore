@@ -1,1 +1,4 @@
 .agents/
+test_mmap
+test_runner
+tests/tmp_mmap.csv
