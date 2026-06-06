@@ -22,4 +22,6 @@ struct CsvParser {
     size_t       escape_buf_cap;
 };
 
+uint64_t fastcsv_find_row_offsets(const char *buf, size_t len, char delim, char quote, size_t **out_offsets);
+
 #endif

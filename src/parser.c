@@ -310,3 +310,62 @@ int csv_next_row(CsvParser *p, CsvRow *out) {
         }
     }
 }
+
+uint64_t fastcsv_find_row_offsets(const char *buf, size_t len, char delim, char quote, size_t **out_offsets) {
+    size_t cap = 100000;
+    size_t *offsets = malloc(cap * sizeof(size_t));
+    uint64_t count = 0;
+    size_t pos = 0;
+    offsets[count++] = 0;
+    
+    int w = fastcsv_simd_width();
+    int quoted = 0;
+    while (pos < len) {
+        if (pos + w <= len) {
+            int width;
+            uint32_t mask = fastcsv_scan_chunk(buf + pos, delim, quote, &width);
+            if (mask == 0) { pos += width; continue; }
+            while (mask != 0) {
+                int bit = __builtin_ctz(mask);
+                char c = buf[pos + bit];
+                if (c == quote) {
+                    quoted = !quoted;
+                } else if (!quoted && c == '\n') {
+                    if (pos + bit > 0 && buf[pos + bit - 1] == '\r') {
+                        // handled by \r
+                    } else {
+                        if (count >= cap) { cap *= 2; offsets = realloc(offsets, cap * sizeof(size_t)); }
+                        offsets[count++] = pos + bit + 1;
+                    }
+                } else if (!quoted && c == '\r') {
+                    size_t next_pos = pos + bit + 1;
+                    if (next_pos < len && buf[next_pos] == '\n') next_pos++;
+                    if (count >= cap) { cap *= 2; offsets = realloc(offsets, cap * sizeof(size_t)); }
+                    offsets[count++] = next_pos;
+                }
+                mask &= mask - 1;
+            }
+            pos += width;
+        } else {
+            char c = buf[pos];
+            if (c == quote) quoted = !quoted;
+            else if (!quoted && c == '\n') {
+                if (pos > 0 && buf[pos - 1] == '\r') {} 
+                else {
+                    if (count >= cap) { cap *= 2; offsets = realloc(offsets, cap * sizeof(size_t)); }
+                    offsets[count++] = pos + 1;
+                }
+            } else if (!quoted && c == '\r') {
+                size_t next_pos = pos + 1;
+                if (next_pos < len && buf[next_pos] == '\n') next_pos++;
+                if (count >= cap) { cap *= 2; offsets = realloc(offsets, cap * sizeof(size_t)); }
+                offsets[count++] = next_pos;
+                pos = next_pos - 1;
+            }
+            pos++;
+        }
+    }
+    if (count > 0 && offsets[count - 1] >= len) count--;
+    *out_offsets = offsets;
+    return count;
+}
