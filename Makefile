@@ -13,7 +13,10 @@ bench-simd:
 	$(CC) $(SIMD_CFLAGS) src/parser.c src/mmap_io.c src/simd.c \
 	      tests/bench_simd.c -o bench_simd && ./bench_simd
 
-test: test-mmap test-parser
+test-types:
+	$(CC) $(CFLAGS) src/type_infer.c tests/test_type_infer.c -o test_types && ./test_types
+
+test: test-mmap test-parser test-types
 
 clean:
-	rm -f test_mmap test_runner bench_simd
+	rm -f test_mmap test_runner bench_simd test_types

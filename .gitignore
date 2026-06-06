@@ -3,3 +3,4 @@ test_mmap
 test_runner
 tests/tmp_mmap.csv
 bench_simd
+test_types
