@@ -21,5 +21,11 @@ test-columnar:
 
 test: test-mmap test-parser test-types test-columnar
 
+bench-data:
+	python bench/gen_data.py
+
+bench: bench-data
+	python bench/bench.py
+
 clean:
 	rm -f test_mmap test_runner bench_simd test_types test_columnar
