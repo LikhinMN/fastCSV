@@ -16,7 +16,10 @@ bench-simd:
 test-types:
 	$(CC) $(CFLAGS) src/type_infer.c tests/test_type_infer.c -o test_types && ./test_types
 
-test: test-mmap test-parser test-types
+test-columnar:
+	$(CC) $(CFLAGS) src/columnar.c src/type_infer.c tests/test_columnar.c -o test_columnar && ./test_columnar
+
+test: test-mmap test-parser test-types test-columnar
 
 clean:
-	rm -f test_mmap test_runner bench_simd test_types
+	rm -f test_mmap test_runner bench_simd test_types test_columnar
