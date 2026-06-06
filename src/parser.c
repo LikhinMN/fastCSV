@@ -1,4 +1,5 @@
 #include "parser.h"
+#include "simd.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -120,8 +121,30 @@ int csv_next_row(CsvParser *p, CsvRow *out) {
     enum { FIELD_START, UNQUOTED, QUOTED, AFTER_QUOTE } state = FIELD_START;
 
     size_t escape_len = 0;
+    int w = fastcsv_simd_width();
 
     while (1) {
+        if (p->pos + w <= p->len && (state == FIELD_START || state == UNQUOTED)) {
+            int width;
+            uint32_t mask = fastcsv_scan_chunk(p->buf + p->pos, delim, quote, &width);
+            if (mask == 0) {
+                if (state == FIELD_START) {
+                    start = p->pos;
+                    state = UNQUOTED;
+                }
+                p->pos += width;
+                continue;
+            } else {
+                int bit = __builtin_ctz(mask);
+                if (state == FIELD_START && bit > 0) {
+                    start = p->pos;
+                    state = UNQUOTED;
+                }
+                p->pos += bit;
+                /* Fall through to let the switch handle the special character */
+            }
+        }
+
         char c = (p->pos < p->len) ? p->buf[p->pos] : '\0';
         int eof = (p->pos >= p->len);
         size_t nl_len = 0;

@@ -152,15 +152,29 @@ int verify_bom(CsvParser *p, CsvRow *row) {
     return 1;
 }
 
+int verify_2_rows_1_field(CsvParser *p, CsvRow *row) {
+    if (csv_next_row(p, row) != CSV_OK) return 0;
+    if (row->num_fields != 1) return 0;
+    if (csv_next_row(p, row) != CSV_OK) return 0;
+    if (row->num_fields != 1) return 0;
+    if (csv_next_row(p, row) != 1) return 0;
+    return 1;
+}
+
 int verify_header_only(CsvParser *p, CsvRow *row) {
-    if (csv_next_row(p, row) != CSV_OK) return 0; // Header row
-    if (csv_next_row(p, row) != 1) return 0; // EOF for data
+    int r1 = csv_next_row(p, row);
+    if (r1 != CSV_OK) { printf("header row failed %d\n", r1); return 0; }
+    int r2 = csv_next_row(p, row);
+    if (r2 != 1) { printf("data row expected 1 got %d\n", r2); return 0; }
     return 1;
 }
 
 int verify_multi_line_quoted(CsvParser *p, CsvRow *row) {
-    if (csv_next_row(p, row) != CSV_OK) return 0;
-    if (row->fields[0].len != 5 || strncmp(row->fields[0].data, "a\nb\nc", 5) != 0) return 0;
+    int r1 = csv_next_row(p, row);
+    if (r1 != CSV_OK) { printf("multi-line row failed %d\n", r1); return 0; }
+    if (row->num_fields != 1) { printf("multi-line fields expected 1 got %d\n", row->num_fields); return 0; }
+    if (row->fields[0].len != 5) { printf("multi-line len expected 5 got %d\n", row->fields[0].len); return 0; }
+    if (strncmp(row->fields[0].data, "a\nb\nc", 5) != 0) { printf("multi-line data mismatch\n"); return 0; }
     return 1;
 }
 
@@ -225,9 +239,9 @@ int main(void) {
     run_test("quoted field containing comma + newline together", "\"a,\nb\"", opts, verify_embedded_newline_comma);
     run_test("triple double-quote: \"\"\" \xE2\x80\x94> \"", "\"\"\"\"", opts, verify_triple_quote);
 
-    run_test("\\n only", "a\nb", opts, verify_mixed_newlines);
-    run_test("\\r\\n", "a\r\nb\r\n", opts, verify_mixed_newlines);
-    run_test("\\r only", "a\rb\r", opts, verify_mixed_newlines);
+    run_test("\\n only", "a\nb", opts, verify_2_rows_1_field);
+    run_test("\\r\\n", "a\r\nb\r\n", opts, verify_2_rows_1_field);
+    run_test("\\r only", "a\rb\r", opts, verify_2_rows_1_field);
     run_test("mixed \\n \\r\\n \\r in same file", "a\nb\r\nc\r", opts, verify_mixed_newlines);
 
     run_test("inconsistent field counts", "a,b\nc,d,e", opts, verify_inconsistent_fields);
@@ -239,11 +253,11 @@ int main(void) {
 
     run_test("UTF-8 BOM skipped", "\xEF\xBB\xBF" "a", opts, verify_bom);
     run_test("empty last field with no trailing newline", "a,", opts, verify_tab_sep); // a, "" -> 2 fields
-    run_test("multi-line quoted field = 1 logical row", "\"a\nb\nc\"", opts, verify_quoted_stripped); // hack verify but 1 row
+    run_test("multi-line quoted field = 1 logical row", "\"a\nb\nc\"", opts, verify_multi_line_quoted);
 
     run_test("empty string \xE2\x80\x94> 0 rows", "", opts, verify_empty_input);
     run_test("single newline \xE2\x80\x94> 0 or 1 empty rows", "\n", opts, verify_single_newline);
-    run_test("header-only file \xE2\x80\x94> 0 data rows, header parsed", "a,b,c\n", opts, verify_basic_2row_3field); // kinda header test
+    run_test("header-only file \xE2\x80\x94> 0 data rows, header parsed", "a,b,c\n", opts, verify_header_only);
 
     opts.error_mode = CSV_ON_ERROR_STRICT;
     run_test("strict: unclosed quote \xE2\x80\x94> CSV_ERR_MALFORMED", "\"a", opts, verify_unclosed_quote_strict);
