@@ -27,5 +27,22 @@ bench-data:
 bench: bench-data
 	python bench/bench.py
 
+test-robustness:
+	python tests/test_robustness.py
+
+test-all: test bench-data
+	python tests/test_python.py
+	python tests/test_robustness.py
+
+sdist:
+	python -m build --sdist
+
+wheel:
+	python -m build --wheel
+
+install-dev:
+	pip install -e ".[bench]"
+
 clean:
-	rm -f test_mmap test_runner bench_simd test_types test_columnar
+	rm -f test_mmap test_runner test_types test_columnar bench_simd
+	rm -rf build dist *.egg-info fastcsv/*.so fastcsv/*.pyd

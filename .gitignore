@@ -5,3 +5,7 @@ tests/tmp_mmap.csv
 bench_simd
 test_types
 test_columnar
+bench/data/
+build/
+dist/
+*.egg-info/

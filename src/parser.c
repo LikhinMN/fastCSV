@@ -33,7 +33,8 @@ CsvParser *csv_parser_new(const char *buf, size_t len, CsvOptions opts) {
     }
 
     /* Skip UTF-8 BOM if present */
-    if (p->len >= 3 && p->buf[0] == '\xef' && p->buf[1] == '\xbb' && p->buf[2] == '\xbf') {
+    if (p->len >= 3 && (unsigned char)p->buf[0] == 0xef && 
+        (unsigned char)p->buf[1] == 0xbb && (unsigned char)p->buf[2] == 0xbf) {
         p->pos += 3;
     }
 
@@ -179,19 +180,28 @@ int csv_next_row(CsvParser *p, CsvRow *out) {
             case UNQUOTED:
                 if (eof) {
                     size_t len = p->pos - start;
-                    if (max_len > 0 && len > max_len) return CSV_ERR_OVERFLOW;
+                    if (max_len > 0 && len > max_len) {
+                        if (p->escape_buf) { free(p->escape_buf); p->escape_buf = NULL; }
+                        return CSV_ERR_OVERFLOW;
+                    }
                     add_field(p, out, p->buf + start, len, 0);
                     return CSV_OK;
                 } else if (c == delim) {
                     size_t len = p->pos - start;
-                    if (max_len > 0 && len > max_len) return CSV_ERR_OVERFLOW;
+                    if (max_len > 0 && len > max_len) {
+                        if (p->escape_buf) { free(p->escape_buf); p->escape_buf = NULL; }
+                        return CSV_ERR_OVERFLOW;
+                    }
                     add_field(p, out, p->buf + start, len, 0);
                     p->pos++;
                     start = p->pos;
                     state = FIELD_START;
                 } else if (is_nl) {
                     size_t len = p->pos - start;
-                    if (max_len > 0 && len > max_len) return CSV_ERR_OVERFLOW;
+                    if (max_len > 0 && len > max_len) {
+                        if (p->escape_buf) { free(p->escape_buf); p->escape_buf = NULL; }
+                        return CSV_ERR_OVERFLOW;
+                    }
                     add_field(p, out, p->buf + start, len, 0);
                     p->pos += nl_len;
                     p->line_num++;
@@ -204,6 +214,7 @@ int csv_next_row(CsvParser *p, CsvRow *out) {
             case QUOTED:
                 if (eof) {
                     if (p->opts.error_mode == CSV_ON_ERROR_STRICT) {
+                        if (p->escape_buf) { free(p->escape_buf); p->escape_buf = NULL; }
                         return CSV_ERR_MALFORMED;
                     } else if (p->opts.error_mode == CSV_ON_ERROR_SKIP) {
                         /* skip logic handles this by EOF */
@@ -223,7 +234,10 @@ int csv_next_row(CsvParser *p, CsvRow *out) {
                             f_data = p->escape_buf;
                             len = escape_len;
                         }
-                        if (max_len > 0 && len > max_len) return CSV_ERR_OVERFLOW;
+                        if (max_len > 0 && len > max_len) {
+                            if (p->escape_buf) { free(p->escape_buf); p->escape_buf = NULL; }
+                            return CSV_ERR_OVERFLOW;
+                        }
                         add_field(p, out, f_data, len, 1);
                         return CSV_OK;
                     }
@@ -256,7 +270,10 @@ int csv_next_row(CsvParser *p, CsvRow *out) {
                             f_data = p->escape_buf;
                             len = escape_len;
                         }
-                        if (max_len > 0 && len > max_len) return CSV_ERR_OVERFLOW;
+                        if (max_len > 0 && len > max_len) {
+                            if (p->escape_buf) { free(p->escape_buf); p->escape_buf = NULL; }
+                            return CSV_ERR_OVERFLOW;
+                        }
                         add_field(p, out, f_data, len, 1);
                         p->pos++;
                         state = AFTER_QUOTE;
@@ -282,6 +299,7 @@ int csv_next_row(CsvParser *p, CsvRow *out) {
                     return CSV_OK;
                 } else {
                     if (p->opts.error_mode == CSV_ON_ERROR_STRICT) {
+                        if (p->escape_buf) { free(p->escape_buf); p->escape_buf = NULL; }
                         return CSV_ERR_MALFORMED;
                     } else {
                         /* skip or replace - advance but stay in AFTER_QUOTE */
