@@ -8,6 +8,8 @@
 #include "parser.h"
 #include "columnar.h"
 #include "simd.h"
+#include "simd_parse.h"
+#include "fast_double.h"
 
 static void set_csv_error(int err) {
     switch (err) {
@@ -118,10 +120,13 @@ typedef struct {
     uint64_t total_rows;
     uint64_t **col_buffers;
     ColType *local_types;
+    uint32_t *max_len;
     uint32_t num_cols;
     char delim;
     char quote;
 } ParseThreadCtx;
+
+/* CopyCtx and copy_thread removed: string columns now use NPY_OBJECT */
 
 #ifdef _WIN32
 static DWORD WINAPI parse_thread(LPVOID arg) {
@@ -129,109 +134,256 @@ static DWORD WINAPI parse_thread(LPVOID arg) {
 static void *parse_thread(void *arg) {
 #endif
     ParseThreadCtx *ctx = (ParseThreadCtx *)arg;
-    for (uint64_t r = ctx->start_row; r < ctx->end_row; r++) {
-        size_t pos = ctx->row_offsets[r];
-        size_t end_pos = (r + 1 < ctx->total_rows) ? ctx->row_offsets[r+1] : ctx->len;
+    int w = fastcsv_simd_width();  /* cache SIMD width once */
+    #define BATCH_ROWS 128
+        uint64_t *field_batch = malloc(ctx->num_cols * BATCH_ROWS * sizeof(uint64_t));
+        uint32_t batch_row_cnt = 0;
         
-        size_t actual_end = end_pos;
-        if (actual_end > pos && ctx->buf[actual_end - 1] == '\n') actual_end--;
-        if (actual_end > pos && ctx->buf[actual_end - 1] == '\r') actual_end--;
+        size_t pos = ctx->row_offsets[ctx->start_row];
+        size_t end_pos = (ctx->end_row < ctx->total_rows) ? ctx->row_offsets[ctx->end_row] : ctx->len;
         
+        uint64_t current_batch_start_row = 0;
+
         uint32_t c = 0;
         int quoted = 0;
         size_t field_start = pos;
         
-        struct { uint32_t start; uint32_t len; } batch[64];
-        int batch_cnt = 0;
         int restarted = 0;
-        
-#define PROCESS_BATCH() do { \
-    for (int i=0; i<batch_cnt; i++) { \
-        if (c >= ctx->num_cols) { c++; continue; } \
-        size_t fstart = batch[i].start; \
-        size_t fl = batch[i].len; \
-        int is_quoted = (fl >= 2 && ctx->buf[fstart] == ctx->quote && ctx->buf[fstart+fl-1] == ctx->quote); \
-        if (is_quoted) { fstart++; fl -= 2; } \
-        CsvField f = { .data = ctx->buf + fstart, .len = fl, .quoted = is_quoted }; \
-        ColType t = ctx->local_types[c]; \
-        ColType new_t = t; \
-        type_infer_update(&new_t, &f); \
-        if (new_t != t) { \
-            if (new_t == COL_TYPE_FLOAT) { \
-                for (uint64_t j = ctx->start_row; j < r; j++) { \
-                    double d_val = (double)(int64_t)ctx->col_buffers[c][j]; \
-                    memcpy(&ctx->col_buffers[c][j], &d_val, 8); \
+
+#define FLUSH_BATCH() do { \
+    if (batch_row_cnt > 0) { \
+        for (uint32_t col = 0; col < ctx->num_cols; col++) { \
+            ColType t = ctx->local_types[col]; \
+            for (uint32_t i = 0; i < batch_row_cnt; i++) { \
+                uint64_t packed = field_batch[col * BATCH_ROWS + i]; \
+                size_t fstart = packed >> 30; \
+                size_t fl = packed & 0x3FFFFFFF; \
+                int is_quoted = (fl >= 2 && ctx->buf[fstart] == ctx->quote && ctx->buf[fstart+fl-1] == ctx->quote); \
+                if (is_quoted) { fstart++; fl -= 2; } \
+                uint64_t curr_r = ctx->start_row + current_batch_start_row + i; \
+                if (curr_r >= ctx->end_row) continue; \
+                int parsed = 0; \
+                if (fl == 0) { \
+                    if (t == COL_TYPE_INT) { \
+                        ctx->col_buffers[col][curr_r] = 0; \
+                    } else if (t == COL_TYPE_FLOAT) { \
+                        double val = 0.0; memcpy(&ctx->col_buffers[col][curr_r], &val, 8); \
+                    } else { \
+                        ctx->col_buffers[col][curr_r] = ((uint64_t)fstart << 30); \
+                    } \
+                    parsed = 1; \
+                } else if (t == COL_TYPE_INT) { \
+                    int int_ok = 0; \
+                    int64_t val = fastcsv_parse_int_fast(ctx->buf + fstart, fl, &int_ok); \
+                    if (int_ok) { \
+                        ctx->col_buffers[col][curr_r] = (uint64_t)val; \
+                        parsed = 1; \
+                        if (32 > ctx->max_len[col]) ctx->max_len[col] = 32; \
+                    } \
+                } else if (t == COL_TYPE_FLOAT) { \
+                    int float_ok = 0; \
+                    double val = fastcsv_parse_double(ctx->buf + fstart, fl, &float_ok); \
+                    if (float_ok) { \
+                        memcpy(&ctx->col_buffers[col][curr_r], &val, 8); \
+                        parsed = 1; \
+                        if (32 > ctx->max_len[col]) ctx->max_len[col] = 32; \
+                    } \
+                } else if (t == COL_TYPE_STR) { \
+                    ctx->col_buffers[col][curr_r] = ((uint64_t)fstart << 30) | (fl & 0x3FFFFFFF); \
+                    if (fl > ctx->max_len[col]) ctx->max_len[col] = fl; \
+                    parsed = 1; \
                 } \
-            } else if (new_t == COL_TYPE_STR) { \
-                ctx->local_types[c] = COL_TYPE_STR; \
-                restarted = 1; break; \
+                if (!parsed) { \
+                    CsvField f = { .data = ctx->buf + fstart, .len = fl, .quoted = is_quoted }; \
+                    ColType new_t = t; \
+                    type_infer_update(&new_t, &f); \
+                    if (new_t != t) { \
+                        if (new_t == COL_TYPE_FLOAT) { \
+                            for (uint64_t j = ctx->start_row; j <= curr_r; j++) { \
+                                double d_val = (double)(int64_t)ctx->col_buffers[col][j]; \
+                                memcpy(&ctx->col_buffers[col][j], &d_val, 8); \
+                            } \
+                        } else if (new_t == COL_TYPE_STR) { \
+                            ctx->local_types[col] = COL_TYPE_STR; \
+                            restarted = 1; break; \
+                        } \
+                        ctx->local_types[col] = new_t; \
+                        t = new_t; \
+                    } \
+                    if (t == COL_TYPE_INT) { \
+                        int64_t val = 0; type_infer_parse(t, &f, &val, NULL, NULL); \
+                        ctx->col_buffers[col][curr_r] = val; \
+                        if (32 > ctx->max_len[col]) ctx->max_len[col] = 32; \
+                    } else if (t == COL_TYPE_FLOAT) { \
+                        double val = 0.0; type_infer_parse(t, &f, NULL, &val, NULL); \
+                        memcpy(&ctx->col_buffers[col][curr_r], &val, 8); \
+                        if (32 > ctx->max_len[col]) ctx->max_len[col] = 32; \
+                    } else { \
+                        ctx->col_buffers[col][curr_r] = ((uint64_t)fstart << 30) | (fl & 0x3FFFFFFF); \
+                        if (fl > ctx->max_len[col]) ctx->max_len[col] = fl; \
+                    } \
+                } \
             } \
-            ctx->local_types[c] = new_t; \
-            t = new_t; \
+            if (restarted) break; \
         } \
-        if (t == COL_TYPE_INT) { \
-            int64_t val = 0; type_infer_parse(t, &f, &val, NULL, NULL); \
-            ctx->col_buffers[c][r] = val; \
-        } else if (t == COL_TYPE_FLOAT) { \
-            double val = 0.0; type_infer_parse(t, &f, NULL, &val, NULL); \
-            memcpy(&ctx->col_buffers[c][r], &val, 8); \
+        if (restarted) { \
+            pos = ctx->row_offsets[ctx->start_row]; \
+            current_batch_start_row = 0; \
+            batch_row_cnt = 0; \
+            c = 0; \
+            quoted = 0; \
+            field_start = pos; \
+            restarted = 0; \
         } else { \
-            ctx->col_buffers[c][r] = ((uint64_t)fstart << 30) | (fl & 0x3FFFFFFF); \
+            current_batch_start_row += batch_row_cnt; \
+            batch_row_cnt = 0; \
         } \
-        c++; \
     } \
-    batch_cnt = 0; \
 } while(0)
 
-        while (pos < actual_end) {
-            int w = fastcsv_simd_width();
-            if (pos + w <= actual_end) {
+        while (pos < end_pos || (pos == end_pos && field_start <= end_pos)) {
+            if (pos + w <= end_pos) {
                 int width;
                 uint32_t mask = fastcsv_scan_chunk(ctx->buf + pos, ctx->delim, ctx->quote, &width);
                 if (mask == 0) { pos += width; continue; }
                 while (mask != 0) {
                     int bit = __builtin_ctz(mask);
-                    if (pos + bit >= actual_end) break;
+                    if (pos + bit >= end_pos) {
+                        pos = end_pos;
+                        break;
+                    }
                     char ch = ctx->buf[pos + bit];
                     if (ch == ctx->quote) {
                         quoted = !quoted;
-                    } else if (!quoted && ch == ctx->delim) {
-                        batch[batch_cnt].start = field_start;
-                        batch[batch_cnt].len = (pos + bit) - field_start;
-                        batch_cnt++;
-                        field_start = pos + bit + 1;
-                        if (batch_cnt == 64) {
-                            PROCESS_BATCH();
+                    } else if (!quoted && (ch == ctx->delim || ch == '\n' || ch == '\r')) {
+                        if (ch == '\r') {
+                            // just skip it, handled by adjusting flen if \n follows
+                        } else if (ch == ctx->delim) {
+                            if (c < ctx->num_cols) {
+                                size_t flen = (pos + bit) - field_start;
+                                field_batch[c * BATCH_ROWS + batch_row_cnt] = ((uint64_t)field_start << 30) | (flen & 0x3FFFFFFF);
+                            }
+                            c++;
+                            field_start = pos + bit + 1;
+                        } else if (ch == '\n') {
+                            if (c < ctx->num_cols) {
+                                size_t flen = (pos + bit) - field_start;
+                                if (flen > 0 && ctx->buf[pos + bit - 1] == '\r') flen--;
+                                field_batch[c * BATCH_ROWS + batch_row_cnt] = ((uint64_t)field_start << 30) | (flen & 0x3FFFFFFF);
+                            }
+                            for (uint32_t missing = c + 1; missing < ctx->num_cols; missing++) {
+                                field_batch[missing * BATCH_ROWS + batch_row_cnt] = ((uint64_t)field_start << 30);
+                            }
+                            batch_row_cnt++;
+                            c = 0;
+                            field_start = pos + bit + 1;
+                            
+                            if (batch_row_cnt == BATCH_ROWS) {
+                                FLUSH_BATCH();
+                                if (restarted) continue; // restarts the while loop naturally because pos is reset
+                            }
                         }
                     }
                     mask &= mask - 1;
                 }
-                if (restarted) break;
-                pos += width;
+                if (pos < end_pos) pos += width;
             } else {
+                if (pos >= end_pos) {
+                    if (field_start < end_pos || (field_start == end_pos && c > 0)) {
+                        if (c < ctx->num_cols) {
+                            size_t flen = end_pos - field_start;
+                            if (flen > 0 && ctx->buf[end_pos - 1] == '\r') flen--;
+                            field_batch[c * BATCH_ROWS + batch_row_cnt] = ((uint64_t)field_start << 30) | (flen & 0x3FFFFFFF);
+                        }
+                        for (uint32_t missing = c + 1; missing < ctx->num_cols; missing++) {
+                            field_batch[missing * BATCH_ROWS + batch_row_cnt] = ((uint64_t)field_start << 30);
+                        }
+                        batch_row_cnt++;
+                    }
+                    pos++;
+                    FLUSH_BATCH();
+                    break;
+                }
+                
                 char ch = ctx->buf[pos];
                 if (ch == ctx->quote) quoted = !quoted;
-                else if (!quoted && ch == ctx->delim) {
-                    batch[batch_cnt].start = field_start;
-                    batch[batch_cnt].len = pos - field_start;
-                    batch_cnt++;
-                    field_start = pos + 1;
-                    if (batch_cnt == 64) {
-                        PROCESS_BATCH();
+                else if (!quoted && (ch == ctx->delim || ch == '\n' || ch == '\r')) {
+                    if (ch == '\r') {
+                        // skip
+                    } else if (ch == ctx->delim) {
+                        if (c < ctx->num_cols) {
+                            size_t flen = pos - field_start;
+                            field_batch[c * BATCH_ROWS + batch_row_cnt] = ((uint64_t)field_start << 30) | (flen & 0x3FFFFFFF);
+                        }
+                        c++;
+                        field_start = pos + 1;
+                    } else if (ch == '\n') {
+                        if (c < ctx->num_cols) {
+                            size_t flen = pos - field_start;
+                            if (flen > 0 && ctx->buf[pos - 1] == '\r') flen--;
+                            field_batch[c * BATCH_ROWS + batch_row_cnt] = ((uint64_t)field_start << 30) | (flen & 0x3FFFFFFF);
+                        }
+                        for (uint32_t missing = c + 1; missing < ctx->num_cols; missing++) {
+                            field_batch[missing * BATCH_ROWS + batch_row_cnt] = ((uint64_t)field_start << 30);
+                        }
+                        batch_row_cnt++;
+                        c = 0;
+                        field_start = pos + 1;
+                        
+                        if (batch_row_cnt == BATCH_ROWS) {
+                            FLUSH_BATCH();
+                        }
                     }
                 }
                 pos++;
             }
         }
-        if (restarted) { r = ctx->start_row - 1; continue; }
         
-        batch[batch_cnt].start = field_start;
-        batch[batch_cnt].len = actual_end - field_start;
-        batch_cnt++;
-        PROCESS_BATCH();
-        if (restarted) { r = ctx->start_row - 1; continue; }
-#undef PROCESS_BATCH
+        FLUSH_BATCH();
+        
+        free(field_batch);
+#undef FLUSH_BATCH
+#undef BATCH_ROWS
+    return 0;
+}
+
+/* Multithreaded string packing context */
+typedef struct {
+    uint64_t *col_buffer;
+    int64_t *offsets;
+    char *str_data;
+    const char *buf;
+    uint64_t start_row;
+    uint64_t end_row;
+    int64_t start_offset;
+    char quote_char;
+    int64_t final_offset; // filled by thread
+} PackThreadCtx;
+
+#ifdef _WIN32
+static DWORD WINAPI pack_thread_func(LPVOID arg) {
+#else
+static void *pack_thread_func(void *arg) {
+#endif
+    PackThreadCtx *ctx = (PackThreadCtx *)arg;
+    int64_t cur_off = ctx->start_offset;
+    for (uint64_t r = ctx->start_row; r < ctx->end_row; r++) {
+        ctx->offsets[r] = cur_off;
+        uint64_t packed = ctx->col_buffer[r];
+        uint32_t str_off = (uint32_t)(packed >> 30);
+        uint32_t flen = (uint32_t)(packed & 0x3FFFFFFF);
+        
+        if (flen > 0 && memchr(ctx->buf + str_off, ctx->quote_char, flen) != NULL) {
+            for (uint32_t qi = 0; qi < flen; qi++) {
+                ctx->str_data[cur_off++] = ctx->buf[str_off + qi];
+                if (ctx->buf[str_off + qi] == ctx->quote_char && qi + 1 < flen && ctx->buf[str_off + qi + 1] == ctx->quote_char) qi++;
+            }
+        } else {
+            memcpy(ctx->str_data + cur_off, ctx->buf + str_off, flen);
+            cur_off += flen;
+        }
     }
+    ctx->final_offset = cur_off;
     return 0;
 }
 
@@ -241,11 +393,11 @@ static PyObject *fastcsv_read_csv(PyObject *self, PyObject *args, PyObject *kwds
     const char *delimiter_str = ",";
     int has_header = 1;
     const char *error_mode_str = "strict";
-    int raw_mode = 0;
+    int arrow_strings = 0;
     
-    static char *kwlist[] = {"path", "delimiter", "has_header", "error_mode", "raw", NULL};
+    static char *kwlist[] = {"path", "delimiter", "has_header", "error_mode", "_arrow_strings", NULL};
     if (!PyArg_ParseTupleAndKeywords(args, kwds, "s|spsp", kwlist,
-                                     &path, &delimiter_str, &has_header, &error_mode_str, &raw_mode)) {
+                                     &path, &delimiter_str, &has_header, &error_mode_str, &arrow_strings)) {
         return NULL;
     }
     
@@ -276,6 +428,8 @@ static PyObject *fastcsv_read_csv(PyObject *self, PyObject *args, PyObject *kwds
     ParseThreadCtx *threads = NULL;
     int nproc = 0;
     int header_consumed = 0;
+    uint32_t num_cols = 0;
+    ColType *sampled_types = NULL;
     
 #ifdef _WIN32
     HANDLE *handles = NULL;
@@ -297,6 +451,9 @@ static PyObject *fastcsv_read_csv(PyObject *self, PyObject *args, PyObject *kwds
     }
     
     Py_BEGIN_ALLOW_THREADS
+
+
+
     total_rows = fastcsv_find_row_offsets(buf, len, opts.delimiter, opts.quote_char, &row_offsets);
     Py_END_ALLOW_THREADS
 
@@ -310,7 +467,7 @@ static PyObject *fastcsv_read_csv(PyObject *self, PyObject *args, PyObject *kwds
     if (res < 0) { set_csv_error(res); goto cleanup; }
     if (res == 1) { dict = PyDict_New(); goto cleanup; }
     
-    uint32_t num_cols = row.num_fields;
+    num_cols = row.num_fields;
     
     if (has_header) {
         header_names = PyList_New(num_cols);
@@ -330,6 +487,42 @@ static PyObject *fastcsv_read_csv(PyObject *self, PyObject *args, PyObject *kwds
         goto cleanup;
     }
     
+    /* ---- Sample-based type inference (P6) ---- */
+    sampled_types = malloc(num_cols * sizeof(ColType));
+    if (!sampled_types) { PyErr_NoMemory(); goto cleanup; }
+    for (uint32_t c = 0; c < num_cols; c++) sampled_types[c] = COL_TYPE_INT;
+    {
+        uint64_t sample_count = (total_rows < 1000) ? total_rows : 1000;
+        uint64_t step = total_rows / sample_count;
+        if (step == 0) step = 1;
+        CsvOptions sample_opts = opts;
+        for (uint64_t s = 0; s < sample_count && s * step < total_rows; s++) {
+            size_t spos = row_offsets[s * step];
+            size_t send = (s * step + 1 < total_rows) ? row_offsets[s * step + 1] : len;
+            /* Trim newlines */
+            while (send > spos && (buf[send-1] == '\n' || buf[send-1] == '\r')) send--;
+            /* Parse fields in this sample row */
+            uint32_t fc = 0;
+            size_t fstart = spos;
+            int squoted = 0;
+            for (size_t i = spos; i <= send; i++) {
+                char ch = (i < send) ? buf[i] : sample_opts.delimiter;
+                if (ch == sample_opts.quote_char) { squoted = !squoted; continue; }
+                if (!squoted && (ch == sample_opts.delimiter || i == send)) {
+                    if (fc < num_cols) {
+                        size_t fs = fstart, fe = i;
+                        /* Strip quotes */
+                        if (fe > fs && buf[fs] == sample_opts.quote_char && buf[fe-1] == sample_opts.quote_char) { fs++; fe--; }
+                        CsvField sf = { .data = buf + fs, .len = (uint32_t)(fe - fs), .quoted = 0 };
+                        type_infer_update(&sampled_types[fc], &sf);
+                        fc++;
+                    }
+                    fstart = i + 1;
+                }
+            }
+        }
+    }
+
     col_buffers = malloc(num_cols * sizeof(uint64_t *));
     if (!col_buffers) { PyErr_NoMemory(); goto cleanup; }
     for (uint32_t c = 0; c < num_cols; c++) {
@@ -359,11 +552,15 @@ static PyObject *fastcsv_read_csv(PyObject *self, PyObject *args, PyObject *kwds
         threads[t].total_rows = total_rows;
         threads[t].col_buffers = col_buffers;
         threads[t].local_types = malloc(num_cols * sizeof(ColType));
-        for (uint32_t c = 0; c < num_cols; c++) threads[t].local_types[c] = COL_TYPE_INT;
+        memcpy(threads[t].local_types, sampled_types, num_cols * sizeof(ColType));  /* use sampled types */
+        threads[t].max_len = calloc(num_cols, sizeof(uint32_t));
         threads[t].num_cols = num_cols;
         threads[t].delim = opts.delimiter;
         threads[t].quote = opts.quote_char;
     }
+
+    free(sampled_types);
+    sampled_types = NULL;
 
     Py_BEGIN_ALLOW_THREADS
     for (int t = 0; t < nproc; t++) {
@@ -421,41 +618,111 @@ static PyObject *fastcsv_read_csv(PyObject *self, PyObject *args, PyObject *kwds
             arr = PyArray_SimpleNewFromData(1, dims, NPY_DOUBLE, col_buffers[c]);
             PyArray_ENABLEFLAGS((PyArrayObject *)arr, NPY_ARRAY_OWNDATA);
             col_buffers[c] = NULL;
-        } else {
-            arr = PyArray_SimpleNew(1, dims, NPY_OBJECT);
-            PyObject **obj_data = (PyObject **)PyArray_DATA((PyArrayObject *)arr);
-            for (uint64_t r = 0; r < total_rows; r++) {
-                int t_idx = 0;
-                for (int t = 0; t < nproc; t++) {
-                    if (r >= threads[t].start_row && r < threads[t].end_row) { t_idx = t; break; }
+        } else if (arrow_strings) {
+            /* Arrow zero-copy path (P1-B): pack strings into offsets+data buffers */
+            uint64_t total_str_bytes = 0;
+            int64_t *thread_start_offsets = malloc(nproc * sizeof(int64_t));
+            
+            for (int t = 0; t < nproc; t++) {
+                uint64_t t_start = threads[t].start_row;
+                uint64_t t_end = threads[t].end_row;
+                if (t_end > total_rows) t_end = total_rows;
+                
+                uint64_t bytes = 0;
+                for (uint64_t r = t_start; r < t_end; r++) {
+                    bytes += (uint32_t)(col_buffers[c][r] & 0x3FFFFFFF);
                 }
-                ColType t_type = threads[t_idx].local_types[c];
-                if (t_type == COL_TYPE_INT) {
-                    char temp[32];
-                    int n = snprintf(temp, sizeof(temp), "%ld", (long)(int64_t)col_buffers[c][r]);
-                    obj_data[r] = raw_mode ? PyBytes_FromStringAndSize(temp, n) : PyUnicode_FromStringAndSize(temp, n);
-                } else if (t_type == COL_TYPE_FLOAT) {
-                    char temp[64];
-                    double d; memcpy(&d, &col_buffers[c][r], 8);
-                    int n = snprintf(temp, sizeof(temp), "%g", d);
-                    obj_data[r] = raw_mode ? PyBytes_FromStringAndSize(temp, n) : PyUnicode_FromStringAndSize(temp, n);
-                } else {
-                    uint64_t packed = col_buffers[c][r];
-                    uint32_t offset = packed >> 30;
-                    uint32_t flen = packed & 0x3FFFFFFF;
-                    int has_quote = (memchr(buf + offset, opts.quote_char, flen) != NULL);
-                    if (!has_quote) {
-                        obj_data[r] = raw_mode ? PyBytes_FromStringAndSize(buf + offset, flen) : PyUnicode_FromStringAndSize(buf + offset, flen);
-                    } else {
-                        char *esc = malloc(flen);
-                        size_t esc_len = 0;
-                        for(size_t i=0; i<flen; i++) {
-                            esc[esc_len++] = buf[offset+i];
-                            if (buf[offset+i] == opts.quote_char && i+1 < flen && buf[offset+i+1] == opts.quote_char) i++;
-                        }
-                        obj_data[r] = raw_mode ? PyBytes_FromStringAndSize(esc, esc_len) : PyUnicode_FromStringAndSize(esc, esc_len);
-                        free(esc);
+                thread_start_offsets[t] = total_str_bytes;
+                total_str_bytes += bytes;
+            }
+            
+            /* Create int64 offsets array (Arrow large_utf8 format) */
+            npy_intp off_dims[1] = { (npy_intp)(total_rows + 1) };
+            PyObject *offsets_arr = PyArray_SimpleNew(1, off_dims, NPY_INT64);
+            if (!offsets_arr) { free(thread_start_offsets); Py_DECREF(key); Py_DECREF(dict); dict = NULL; goto cleanup; }
+            int64_t *offsets_ptr = (int64_t *)PyArray_DATA((PyArrayObject *)offsets_arr);
+            
+            /* Create contiguous data buffer */
+            PyObject *data_bytes = PyBytes_FromStringAndSize(NULL, (Py_ssize_t)total_str_bytes);
+            if (!data_bytes) { free(thread_start_offsets); Py_DECREF(offsets_arr); Py_DECREF(key); Py_DECREF(dict); dict = NULL; goto cleanup; }
+            char *str_data = PyBytes_AS_STRING(data_bytes);
+            
+            PackThreadCtx *pack_ctxs = malloc(nproc * sizeof(PackThreadCtx));
+            for (int t = 0; t < nproc; t++) {
+                uint64_t t_start = threads[t].start_row;
+                uint64_t t_end = threads[t].end_row;
+                if (t_end > total_rows) t_end = total_rows;
+                
+                pack_ctxs[t].col_buffer = col_buffers[c];
+                pack_ctxs[t].offsets = offsets_ptr;
+                pack_ctxs[t].str_data = str_data;
+                pack_ctxs[t].buf = buf;
+                pack_ctxs[t].start_row = t_start;
+                pack_ctxs[t].end_row = t_end;
+                pack_ctxs[t].start_offset = thread_start_offsets[t];
+                pack_ctxs[t].quote_char = opts.quote_char;
+            }
+            
+            Py_BEGIN_ALLOW_THREADS
+            for (int t = 0; t < nproc; t++) {
+#ifdef _WIN32
+                handles[t] = CreateThread(NULL, 0, pack_thread_func, &pack_ctxs[t], 0, NULL);
+#else
+                pthread_create(&pthreads[t], NULL, pack_thread_func, &pack_ctxs[t]);
+#endif
+            }
+#ifdef _WIN32
+            WaitForMultipleObjects(nproc, handles, TRUE, INFINITE);
+#else
+            for (int t = 0; t < nproc; t++) pthread_join(pthreads[t], NULL);
+#endif
+            Py_END_ALLOW_THREADS
+            
+            int64_t cur_off = pack_ctxs[nproc - 1].final_offset;
+            offsets_ptr[total_rows] = cur_off;
+            
+            free(thread_start_offsets);
+            free(pack_ctxs);
+            
+            /* Shrink buffer if quote unescaping reduced total size */
+            if (cur_off < (int64_t)total_str_bytes) {
+                _PyBytes_Resize(&data_bytes, (Py_ssize_t)cur_off);
+            }
+            
+            /* Return as (offsets, data) tuple — Python wrapper converts to Arrow */
+            arr = PyTuple_Pack(2, offsets_arr, data_bytes);
+            Py_DECREF(offsets_arr);
+            Py_DECREF(data_bytes);
+            PyDataMem_FREE(col_buffers[c]);
+            col_buffers[c] = NULL;
+        } else {
+            /* String column: use NPY_OBJECT for compact Python str output */
+            arr = PyArray_SimpleNew(1, dims, NPY_OBJECT);
+            if (!arr) { Py_DECREF(key); Py_DECREF(dict); goto cleanup; }
+            PyObject **str_ptrs = (PyObject **)PyArray_DATA((PyArrayObject *)arr);
+            
+            for (uint64_t r = 0; r < total_rows; r++) {
+                uint64_t packed = col_buffers[c][r];
+                uint32_t offset = (uint32_t)(packed >> 30);
+                uint32_t flen = (uint32_t)(packed & 0x3FFFFFFF);
+                
+                /* Check for escaped quotes */
+                if (flen > 0 && memchr(buf + offset, opts.quote_char, flen) != NULL) {
+                    char *tmp = (char *)malloc(flen);
+                    size_t out_len = 0;
+                    for (uint32_t i = 0; i < flen; i++) {
+                        tmp[out_len++] = buf[offset + i];
+                        if (buf[offset + i] == opts.quote_char && i + 1 < flen && buf[offset + i + 1] == opts.quote_char) i++;
                     }
+                    str_ptrs[r] = PyUnicode_FromStringAndSize(tmp, out_len);
+                    free(tmp);
+                } else {
+                    str_ptrs[r] = PyUnicode_FromStringAndSize(buf + offset, flen);
+                }
+                if (!str_ptrs[r]) {
+                    for (uint64_t j = 0; j < r; j++) { Py_XDECREF(str_ptrs[j]); }
+                    Py_DECREF(arr); Py_DECREF(key); Py_DECREF(dict);
+                    dict = NULL; goto cleanup;
                 }
             }
             PyDataMem_FREE(col_buffers[c]);
@@ -469,7 +736,10 @@ static PyObject *fastcsv_read_csv(PyObject *self, PyObject *args, PyObject *kwds
 
 cleanup:
     if (threads) {
-        for (int t = 0; t < nproc; t++) free(threads[t].local_types);
+        for (int t = 0; t < nproc; t++) {
+            if (threads[t].local_types) free(threads[t].local_types);
+            if (threads[t].max_len) free(threads[t].max_len);
+        }
         free(threads);
     }
 #ifdef _WIN32
@@ -483,6 +753,7 @@ cleanup:
         }
         free(col_buffers);
     }
+    if (sampled_types) free(sampled_types);
     if (header_consumed && row_offsets) row_offsets--; // restore pointer for free
     if (row_offsets) free(row_offsets);
     if (p) csv_parser_free(p);
@@ -669,3 +940,4 @@ PyMODINIT_FUNC PyInit_fastcsv(void) {
     
     return PyModule_Create(&mod);
 }
+
