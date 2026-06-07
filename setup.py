@@ -14,7 +14,6 @@ class BuildExt(build_ext):
                     '-O3', '-std=c11', '-DNDEBUG',
                     '-Wall', '-Wextra',
                     '-march=native',
-                    '-fvisibility=hidden',
                     '-funroll-loops',
                     '-fno-math-errno',
                     '-fomit-frame-pointer',
