@@ -334,7 +334,7 @@ uint64_t fastcsv_count_rows_and_partitions(const char *buf, size_t len, char quo
             uint32_t mask = fastcsv_scan_chunk(buf + pos, '\n', quote, &width);
             if (mask == 0) { pos += width; continue; }
             while (mask != 0) {
-                int bit = __builtin_ctz(mask);
+                int bit = fastcsv_ctz(mask);
                 char c = buf[pos + bit];
                 if (c == quote) {
                     quoted = 1;

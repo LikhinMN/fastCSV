@@ -18,9 +18,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build wheels
-        uses: pypa/cibuildwheel@v2.17.0
+        uses: pypa/cibuildwheel@v2.22.0
         env:
           CIBW_SKIP: "pp* *i686 *musllinux* *win32"
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_28
           CIBW_TEST_REQUIRES: numpy pyarrow
           # Run the test scripts directly since they are not pytest modules
           CIBW_TEST_COMMAND: "python {project}/tests/test_final.py && python {project}/tests/test_python.py && python {project}/tests/test_robustness.py"

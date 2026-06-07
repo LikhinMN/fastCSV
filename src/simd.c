@@ -60,11 +60,32 @@ static uint32_t scan_scalar(const char *buf, char delim, char quote) {
 
 /* --- public API --- */
 
+#if defined(_MSC_VER)
+#include <intrin.h>
+static int fastcsv_cpu_supports_avx2(void) {
+    int cpuInfo[4];
+    __cpuidex(cpuInfo, 7, 0);
+    return (cpuInfo[1] & (1 << 5)) != 0;
+}
+static int fastcsv_cpu_supports_sse42(void) {
+    int cpuInfo[4];
+    __cpuid(cpuInfo, 1);
+    return (cpuInfo[2] & (1 << 20)) != 0;
+}
+#else
+static int fastcsv_cpu_supports_avx2(void) {
+    return __builtin_cpu_supports("avx2");
+}
+static int fastcsv_cpu_supports_sse42(void) {
+    return __builtin_cpu_supports("sse4.2");
+}
+#endif
+
 void fastcsv_detect_cpu(void) {
 #if defined(__x86_64__) || defined(_M_X64)
-    if (__builtin_cpu_supports("avx2"))       { g_simd_width = 32; g_scan_fn = scan_avx2; }
-    else if (__builtin_cpu_supports("sse4.2")) { g_simd_width = 16; g_scan_fn = scan_sse42; }
-    else                                       { g_simd_width =  1; g_scan_fn = scan_scalar; }
+    if (fastcsv_cpu_supports_avx2())       { g_simd_width = 32; g_scan_fn = scan_avx2; }
+    else if (fastcsv_cpu_supports_sse42()) { g_simd_width = 16; g_scan_fn = scan_sse42; }
+    else                                   { g_simd_width =  1; g_scan_fn = scan_scalar; }
 #else
     g_simd_width = 1;
     g_scan_fn = scan_scalar;
