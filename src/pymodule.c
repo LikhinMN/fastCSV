@@ -471,7 +471,7 @@ static PyObject *fastcsv_read_csv(PyObject *self, PyObject *args, PyObject *kwds
             PyList_SET_ITEM(header_names, i, str_obj);
         }
         total_rows--; // header consumed
-        part_offsets[0] = p->pos; // skip header bytes
+        part_offsets[0] = p->pos - (buf - p->buf); // skip header bytes, adjusting for BOM if present
         for (int i = 0; i <= nproc; i++) {
             if (part_rows[i] > 0) part_rows[i]--;
         }
@@ -537,9 +537,12 @@ static PyObject *fastcsv_read_csv(PyObject *self, PyObject *args, PyObject *kwds
         if (!col_buffers[c]) { PyErr_NoMemory(); goto cleanup; }
     }
     
-    nproc = get_nproc();
     if (nproc > 32) nproc = 32;
-    if (total_rows < (uint64_t)nproc * 100) nproc = 1;
+    if (total_rows < (uint64_t)nproc * 100) {
+        nproc = 1;
+        part_offsets[1] = len;
+        part_rows[1] = total_rows;
+    }
     
     threads = calloc(nproc, sizeof(ParseThreadCtx));
     uint64_t rows_per_thread = total_rows / nproc;
