@@ -780,9 +780,6 @@ cleanup:
     if (part_rows) free(part_rows);
     if (p) csv_parser_free(p);
     
-    struct timespec t4;
-    clock_gettime(CLOCK_MONOTONIC, &t4);
-    
     Py_XDECREF(header_names);
     return dict;
 }
