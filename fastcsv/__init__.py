@@ -9,20 +9,21 @@ from .fastcsv import read_csv as _read_csv_c, reader
 __version__ = "0.1.0"
 
 
-def read_csv(path, delimiter=",", has_header=True, error_mode="strict"):
+def read_csv(path, delimiter=",", has_header=True, error_mode="strict", raw=False):
     """Read an entire CSV file into a dict of numpy arrays.
 
     When pyarrow is available, string columns are returned as
     pyarrow.LargeStringArray (zero-copy, lazy string creation).
     Otherwise they are returned as numpy object arrays of Python str.
     """
-    use_arrow = _HAS_ARROW
+    use_arrow = _HAS_ARROW and not raw
     result = _read_csv_c(
         path,
         delimiter=delimiter,
         has_header=has_header,
         error_mode=error_mode,
         _arrow_strings=use_arrow,
+        raw=raw
     )
     if use_arrow:
         for key in list(result.keys()):

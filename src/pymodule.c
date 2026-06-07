@@ -379,10 +379,11 @@ static PyObject *fastcsv_read_csv(PyObject *self, PyObject *args, PyObject *kwds
     int has_header = 1;
     const char *error_mode_str = "strict";
     int arrow_strings = 1;
+    int raw = 0;
     
-    static char *kwlist[] = {"path", "delimiter", "has_header", "error_mode", "_arrow_strings", NULL};
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "s|spsp", kwlist,
-                                     &path, &delimiter_str, &has_header, &error_mode_str, &arrow_strings)) {
+    static char *kwlist[] = {"path", "delimiter", "has_header", "error_mode", "_arrow_strings", "raw", NULL};
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "s|spspp", kwlist,
+                                     &path, &delimiter_str, &has_header, &error_mode_str, &arrow_strings, &raw)) {
         return NULL;
     }
     
@@ -640,7 +641,7 @@ static PyObject *fastcsv_read_csv(PyObject *self, PyObject *args, PyObject *kwds
             arr = PyArray_SimpleNewFromData(1, dims, NPY_DOUBLE, col_buffers[c]);
             PyArray_ENABLEFLAGS((PyArrayObject *)arr, NPY_ARRAY_OWNDATA);
             col_buffers[c] = NULL;
-        } else if (arrow_strings) {
+        } else if (arrow_strings && !raw) {
             /* Arrow zero-copy path (P1-B): pack strings into offsets+data buffers */
             uint64_t total_str_bytes = 0;
             int64_t *thread_start_offsets = malloc(nproc * sizeof(int64_t));
@@ -733,10 +734,12 @@ static PyObject *fastcsv_read_csv(PyObject *self, PyObject *args, PyObject *kwds
                         tmp[out_len++] = buf[offset + i];
                         if (buf[offset + i] == opts.quote_char && i + 1 < flen && buf[offset + i + 1] == opts.quote_char) i++;
                     }
-                    str_ptrs[r] = PyUnicode_FromStringAndSize(tmp, out_len);
+                    if (raw) str_ptrs[r] = PyBytes_FromStringAndSize(tmp, out_len);
+                    else str_ptrs[r] = PyUnicode_FromStringAndSize(tmp, out_len);
                     free(tmp);
                 } else {
-                    str_ptrs[r] = PyUnicode_FromStringAndSize(buf + offset, flen);
+                    if (raw) str_ptrs[r] = PyBytes_FromStringAndSize(buf + offset, flen);
+                    else str_ptrs[r] = PyUnicode_FromStringAndSize(buf + offset, flen);
                 }
                 if (!str_ptrs[r]) {
                     for (uint64_t j = 0; j < r; j++) { Py_XDECREF(str_ptrs[j]); }
