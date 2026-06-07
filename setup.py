@@ -15,13 +15,10 @@ class BuildExt(build_ext):
                     '-Wall', '-Wextra',
                     '-march=native',
                     '-fvisibility=hidden',
-                    '-flto',
                     '-funroll-loops',
                     '-fno-math-errno',
                     '-fomit-frame-pointer',
                 ]
-                if platform.system() == 'Linux':
-                    ext.extra_link_args = ['-Wl,--strip-all', '-flto']
         super().build_extensions()
 
 ext = Extension(
