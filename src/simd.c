@@ -2,20 +2,10 @@
 
 static int g_simd_width = 0;  /* 0 = not detected yet */
 
-void fastcsv_detect_cpu(void) {
-#if defined(__x86_64__) || defined(_M_X64)
-    if (__builtin_cpu_supports("avx2"))       g_simd_width = 32;
-    else if (__builtin_cpu_supports("sse4.2")) g_simd_width = 16;
-    else                                       g_simd_width =  1;
-#else
-    g_simd_width = 1;  /* ARM / RISC-V / unknown → scalar */
-#endif
-}
+typedef uint32_t (*fastcsv_scan_fn_t)(const char *, char, char);
+static fastcsv_scan_fn_t g_scan_fn = NULL;
 
-int fastcsv_simd_width(void) {
-    if (g_simd_width == 0) fastcsv_detect_cpu();
-    return g_simd_width;
-}
+/* --- scan implementations --- */
 
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
@@ -23,6 +13,7 @@ int fastcsv_simd_width(void) {
 
 __attribute__((target("avx2")))
 static uint32_t scan_avx2(const char *buf, char delim, char quote) {
+    __builtin_prefetch(buf + 256, 0, 0);  /* prefetch ahead */
     __m256i chunk  = _mm256_loadu_si256((const __m256i *)buf);
     __m256i vd     = _mm256_set1_epi8(delim);
     __m256i vq     = _mm256_set1_epi8(quote);
@@ -61,6 +52,24 @@ static uint32_t scan_scalar(const char *buf, char delim, char quote) {
     return mask;
 }
 
+/* --- public API --- */
+
+void fastcsv_detect_cpu(void) {
+#if defined(__x86_64__) || defined(_M_X64)
+    if (__builtin_cpu_supports("avx2"))       { g_simd_width = 32; g_scan_fn = scan_avx2; }
+    else if (__builtin_cpu_supports("sse4.2")) { g_simd_width = 16; g_scan_fn = scan_sse42; }
+    else                                       { g_simd_width =  1; g_scan_fn = scan_scalar; }
+#else
+    g_simd_width = 1;
+    g_scan_fn = scan_scalar;
+#endif
+}
+
+int fastcsv_simd_width(void) {
+    if (g_simd_width == 0) fastcsv_detect_cpu();
+    return g_simd_width;
+}
+
 uint32_t fastcsv_scan_chunk(const char *buf, char delim, char quote, int *width_out) {
     int w = fastcsv_simd_width();
     *width_out = w;
@@ -69,4 +78,8 @@ uint32_t fastcsv_scan_chunk(const char *buf, char delim, char quote, int *width_
     if (w == 16) return scan_sse42(buf, delim, quote);
 #endif
     return scan_scalar(buf, delim, quote);
+}
+
+uint32_t fastcsv_scan_direct(const char *buf, char delim, char quote) {
+    return g_scan_fn(buf, delim, quote);
 }

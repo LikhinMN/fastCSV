@@ -29,7 +29,7 @@ print("─" * 56)
 
 for label, path in FILES.items():
     mb = file_mb(path)
-    results = {
+    print(f"Running {label}..."); results = {
         "fastcsv":  bench(label, lambda p=path: fastcsv.read_csv(p)),
         "pandas":   bench(label, lambda p=path: pd.read_csv(p)),
         "polars":   bench(label, lambda p=path: pl.read_csv(p)),

@@ -13,11 +13,15 @@ class BuildExt(build_ext):
                 ext.extra_compile_args = [
                     '-O3', '-std=c11', '-DNDEBUG',
                     '-Wall', '-Wextra',
-                    '-march=native',        # enable AVX2/SSE4.2 if available
-                    '-fvisibility=hidden',  # only PyInit_fastcsv exported
+                    '-march=native',
+                    '-fvisibility=hidden',
+                    '-flto',
+                    '-funroll-loops',
+                    '-fno-math-errno',
+                    '-fomit-frame-pointer',
                 ]
                 if platform.system() == 'Linux':
-                    ext.extra_link_args = ['-Wl,--strip-all']
+                    ext.extra_link_args = ['-Wl,--strip-all', '-flto']
         super().build_extensions()
 
 ext = Extension(
@@ -44,7 +48,10 @@ setup(
     cmdclass={"build_ext": BuildExt},
     python_requires=">=3.8",
     install_requires=["numpy>=1.20"],
-    extras_require={"bench": ["pandas", "polars"]},
+    extras_require={
+        "bench": ["pandas", "polars", "pyarrow"],
+        "arrow": ["pyarrow>=10.0"],
+    },
     classifiers=[
         "Programming Language :: Python :: 3",
         "Programming Language :: C",

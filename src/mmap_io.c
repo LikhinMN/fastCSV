@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include "mmap_io.h"
 #include <stdio.h>
 #include <stddef.h>
@@ -90,6 +91,9 @@ int mmap_open(const char *path, MmapFile *out) {
         close(fd);
         return -1;
     }
+
+    /* Hint: sequential access pattern for aggressive readahead */
+    madvise(data, st.st_size, MADV_SEQUENTIAL);
 
     close(fd);
 

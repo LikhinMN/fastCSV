@@ -19,4 +19,7 @@ void fastcsv_detect_cpu(void);
 /* The width the scanner will use on this CPU: 32, 16, or 1.         */
 int fastcsv_simd_width(void);
 
+/* Direct scan without width_out overhead. Call fastcsv_detect_cpu() first. */
+uint32_t fastcsv_scan_direct(const char *buf, char delim, char quote);
+
 #endif
