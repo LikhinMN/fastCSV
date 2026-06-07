@@ -311,37 +311,39 @@ int csv_next_row(CsvParser *p, CsvRow *out) {
     }
 }
 
-uint64_t fastcsv_find_row_offsets(const char *buf, size_t len, char delim, char quote, size_t **out_offsets) {
-    size_t cap = 100000;
-    size_t *offsets = malloc(cap * sizeof(size_t));
+uint64_t fastcsv_count_rows_and_partitions(const char *buf, size_t len, char quote, int nproc, size_t **out_part_offsets, uint64_t **out_part_rows) {
+    size_t *p_offsets = malloc((nproc + 1) * sizeof(size_t));
+    uint64_t *p_rows = malloc((nproc + 1) * sizeof(uint64_t));
+    
     uint64_t count = 0;
     size_t pos = 0;
-    offsets[count++] = 0;
+    
+    p_offsets[0] = 0;
+    p_rows[0] = 0;
+    
+    size_t target_chunk = len / nproc;
+    int current_part = 1;
     
     int w = fastcsv_simd_width();
     int quoted = 0;
+    
     while (pos < len) {
         if (pos + w <= len) {
             int width;
-            uint32_t mask = fastcsv_scan_chunk(buf + pos, delim, quote, &width);
+            uint32_t mask = fastcsv_scan_newlines(buf + pos, quote, &width);
             if (mask == 0) { pos += width; continue; }
             while (mask != 0) {
                 int bit = __builtin_ctz(mask);
                 char c = buf[pos + bit];
-                if (c == quote) {
-                    quoted = !quoted;
-                } else if (!quoted && c == '\n') {
-                    if (pos + bit > 0 && buf[pos + bit - 1] == '\r') {
-                        // handled by \r
-                    } else {
-                        if (count >= cap) { cap *= 2; offsets = realloc(offsets, cap * sizeof(size_t)); }
-                        offsets[count++] = pos + bit + 1;
+                quoted ^= (c == quote);
+                if (!quoted && c == '\n') {
+                    count++;
+                    size_t nl_pos = pos + bit + 1;
+                    if (current_part < nproc && nl_pos >= current_part * target_chunk) {
+                        p_offsets[current_part] = nl_pos;
+                        p_rows[current_part] = count;
+                        current_part++;
                     }
-                } else if (!quoted && c == '\r') {
-                    size_t next_pos = pos + bit + 1;
-                    if (next_pos < len && buf[next_pos] == '\n') next_pos++;
-                    if (count >= cap) { cap *= 2; offsets = realloc(offsets, cap * sizeof(size_t)); }
-                    offsets[count++] = next_pos;
                 }
                 mask &= mask - 1;
             }
@@ -350,22 +352,37 @@ uint64_t fastcsv_find_row_offsets(const char *buf, size_t len, char delim, char 
             char c = buf[pos];
             if (c == quote) quoted = !quoted;
             else if (!quoted && c == '\n') {
-                if (pos > 0 && buf[pos - 1] == '\r') {} 
-                else {
-                    if (count >= cap) { cap *= 2; offsets = realloc(offsets, cap * sizeof(size_t)); }
-                    offsets[count++] = pos + 1;
+                count++;
+                size_t nl_pos = pos + 1;
+                if (current_part < nproc && nl_pos >= current_part * target_chunk) {
+                    p_offsets[current_part] = nl_pos;
+                    p_rows[current_part] = count;
+                    current_part++;
                 }
             } else if (!quoted && c == '\r') {
-                size_t next_pos = pos + 1;
-                if (next_pos < len && buf[next_pos] == '\n') next_pos++;
-                if (count >= cap) { cap *= 2; offsets = realloc(offsets, cap * sizeof(size_t)); }
-                offsets[count++] = next_pos;
-                pos = next_pos - 1;
+                size_t nl_pos = pos + 1;
+                if (nl_pos < len && buf[nl_pos] == '\n') {
+                    // skip, wait for \n
+                } else {
+                    count++;
+                    if (current_part < nproc && nl_pos >= current_part * target_chunk) {
+                        p_offsets[current_part] = nl_pos;
+                        p_rows[current_part] = count;
+                        current_part++;
+                    }
+                }
             }
             pos++;
         }
     }
-    if (count > 0 && offsets[count - 1] >= len) count--;
-    *out_offsets = offsets;
+    
+    while (current_part <= nproc) {
+        p_offsets[current_part] = len;
+        p_rows[current_part] = count;
+        current_part++;
+    }
+    
+    *out_part_offsets = p_offsets;
+    *out_part_rows = p_rows;
     return count;
 }

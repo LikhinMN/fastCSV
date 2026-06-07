@@ -12,6 +12,8 @@ uint32_t fastcsv_scan_chunk(const char *buf,
                              char delim, char quote,
                              int *width_out);
 
+uint32_t fastcsv_scan_newlines(const char *buf, char quote, int *width_out);
+
 /* Runtime CPU feature detection. Called once at startup.
    Sets internal flags for AVX2 / SSE4.2 availability.               */
 void fastcsv_detect_cpu(void);

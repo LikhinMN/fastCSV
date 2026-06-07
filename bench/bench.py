@@ -13,11 +13,14 @@ RUNS = 3
 
 def bench(name, fn):
     times = []
+    # keep a list of results so they aren't deallocated during timing
+    results = []
     for _ in range(RUNS):
         gc.collect()
         t = time.perf_counter()
-        fn()
+        res = fn()
         times.append(time.perf_counter() - t)
+        results.append(res)
     best = min(times)
     return best
 

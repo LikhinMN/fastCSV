@@ -83,3 +83,46 @@ uint32_t fastcsv_scan_chunk(const char *buf, char delim, char quote, int *width_
 uint32_t fastcsv_scan_direct(const char *buf, char delim, char quote) {
     return g_scan_fn(buf, delim, quote);
 }
+
+#if defined(__x86_64__) || defined(_M_X64)
+__attribute__((target("avx2")))
+static uint32_t scan_nl_avx2(const char *buf, char quote) {
+    __m256i chunk  = _mm256_loadu_si256((const __m256i *)buf);
+    __m256i vq     = _mm256_set1_epi8(quote);
+    __m256i vnl    = _mm256_set1_epi8('\n');
+    __m256i vcr    = _mm256_set1_epi8('\r');
+
+    return (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, vq))  |
+           (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, vnl)) |
+           (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, vcr));
+}
+
+__attribute__((target("sse4.2")))
+static uint32_t scan_nl_sse42(const char *buf, char quote) {
+    __m128i chunk  = _mm_loadu_si128((const __m128i *)buf);
+    __m128i vq     = _mm_set1_epi8(quote);
+    __m128i vnl    = _mm_set1_epi8('\n');
+    __m128i vcr    = _mm_set1_epi8('\r');
+
+    return (uint16_t)_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, vq))  |
+           (uint16_t)_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, vnl)) |
+           (uint16_t)_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, vcr));
+}
+#endif
+
+static uint32_t scan_nl_scalar(const char *buf, char quote) {
+    uint32_t mask = 0;
+    char c = buf[0];
+    if (c == quote || c == '\n' || c == '\r') mask = 1;
+    return mask;
+}
+
+uint32_t fastcsv_scan_newlines(const char *buf, char quote, int *width_out) {
+    int w = fastcsv_simd_width();
+    *width_out = w;
+#if defined(__x86_64__) || defined(_M_X64)
+    if (w == 32) return scan_nl_avx2(buf, quote);
+    if (w == 16) return scan_nl_sse42(buf, quote);
+#endif
+    return scan_nl_scalar(buf, quote);
+}

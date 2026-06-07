@@ -114,9 +114,10 @@ static int get_nproc() {
 typedef struct {
     const char *buf;
     size_t len;
-    size_t *row_offsets;
     uint64_t start_row;
     uint64_t end_row;
+    size_t start_pos;
+    size_t end_pos;
     uint64_t total_rows;
     uint64_t **col_buffers;
     ColType *local_types;
@@ -124,6 +125,7 @@ typedef struct {
     uint32_t num_cols;
     char delim;
     char quote;
+    uint64_t *str_bytes;
 } ParseThreadCtx;
 
 /* CopyCtx and copy_thread removed: string columns now use NPY_OBJECT */
@@ -139,8 +141,8 @@ static void *parse_thread(void *arg) {
         uint64_t *field_batch = malloc(ctx->num_cols * BATCH_ROWS * sizeof(uint64_t));
         uint32_t batch_row_cnt = 0;
         
-        size_t pos = ctx->row_offsets[ctx->start_row];
-        size_t end_pos = (ctx->end_row < ctx->total_rows) ? ctx->row_offsets[ctx->end_row] : ctx->len;
+        size_t pos = ctx->start_pos;
+        size_t end_pos = ctx->end_pos;
         
         uint64_t current_batch_start_row = 0;
 
@@ -151,83 +153,53 @@ static void *parse_thread(void *arg) {
         int restarted = 0;
 
 #define FLUSH_BATCH() do { \
-    if (batch_row_cnt > 0) { \
         for (uint32_t col = 0; col < ctx->num_cols; col++) { \
             ColType t = ctx->local_types[col]; \
-            for (uint32_t i = 0; i < batch_row_cnt; i++) { \
-                uint64_t packed = field_batch[col * BATCH_ROWS + i]; \
-                size_t fstart = packed >> 30; \
-                size_t fl = packed & 0x3FFFFFFF; \
-                int is_quoted = (fl >= 2 && ctx->buf[fstart] == ctx->quote && ctx->buf[fstart+fl-1] == ctx->quote); \
-                if (is_quoted) { fstart++; fl -= 2; } \
-                uint64_t curr_r = ctx->start_row + current_batch_start_row + i; \
-                if (curr_r >= ctx->end_row) continue; \
-                int parsed = 0; \
-                if (fl == 0) { \
-                    if (t == COL_TYPE_INT) { \
-                        ctx->col_buffers[col][curr_r] = 0; \
-                    } else if (t == COL_TYPE_FLOAT) { \
-                        double val = 0.0; memcpy(&ctx->col_buffers[col][curr_r], &val, 8); \
-                    } else { \
-                        ctx->col_buffers[col][curr_r] = ((uint64_t)fstart << 30); \
-                    } \
-                    parsed = 1; \
-                } else if (t == COL_TYPE_INT) { \
+            if (t == COL_TYPE_INT) { \
+                for (uint32_t i = 0; i < batch_row_cnt; i++) { \
+                    uint64_t packed = field_batch[col * BATCH_ROWS + i]; \
+                    size_t fstart = packed >> 30; size_t fl = packed & 0x3FFFFFFF; \
+                    int is_quoted = (fl >= 2 && ctx->buf[fstart] == ctx->quote && ctx->buf[fstart+fl-1] == ctx->quote); \
+                    if (is_quoted) { fstart++; fl -= 2; } \
+                    uint64_t curr_r = ctx->start_row + current_batch_start_row + i; \
+                    if (curr_r >= ctx->end_row) continue; \
                     int int_ok = 0; \
                     int64_t val = fastcsv_parse_int_fast(ctx->buf + fstart, fl, &int_ok); \
-                    if (int_ok) { \
-                        ctx->col_buffers[col][curr_r] = (uint64_t)val; \
-                        parsed = 1; \
-                        if (32 > ctx->max_len[col]) ctx->max_len[col] = 32; \
-                    } \
-                } else if (t == COL_TYPE_FLOAT) { \
+                    if (int_ok) { ctx->col_buffers[col][curr_r] = (uint64_t)val; } \
+                    else { ctx->local_types[col] = COL_TYPE_STR; restarted = 1; break; } \
+                } \
+            } else if (t == COL_TYPE_FLOAT) { \
+                for (uint32_t i = 0; i < batch_row_cnt; i++) { \
+                    uint64_t packed = field_batch[col * BATCH_ROWS + i]; \
+                    size_t fstart = packed >> 30; size_t fl = packed & 0x3FFFFFFF; \
+                    int is_quoted = (fl >= 2 && ctx->buf[fstart] == ctx->quote && ctx->buf[fstart+fl-1] == ctx->quote); \
+                    if (is_quoted) { fstart++; fl -= 2; } \
+                    uint64_t curr_r = ctx->start_row + current_batch_start_row + i; \
+                    if (curr_r >= ctx->end_row) continue; \
+                    if (fl == 0) { double val = 0.0; memcpy(&ctx->col_buffers[col][curr_r], &val, 8); continue; } \
                     int float_ok = 0; \
                     double val = fastcsv_parse_double(ctx->buf + fstart, fl, &float_ok); \
-                    if (float_ok) { \
-                        memcpy(&ctx->col_buffers[col][curr_r], &val, 8); \
-                        parsed = 1; \
-                        if (32 > ctx->max_len[col]) ctx->max_len[col] = 32; \
-                    } \
-                } else if (t == COL_TYPE_STR) { \
-                    ctx->col_buffers[col][curr_r] = ((uint64_t)fstart << 30) | (fl & 0x3FFFFFFF); \
-                    if (fl > ctx->max_len[col]) ctx->max_len[col] = fl; \
-                    parsed = 1; \
+                    if (float_ok) { memcpy(&ctx->col_buffers[col][curr_r], &val, 8); } \
+                    else { ctx->local_types[col] = COL_TYPE_STR; restarted = 1; break; } \
                 } \
-                if (!parsed) { \
-                    CsvField f = { .data = ctx->buf + fstart, .len = fl, .quoted = is_quoted }; \
-                    ColType new_t = t; \
-                    type_infer_update(&new_t, &f); \
-                    if (new_t != t) { \
-                        if (new_t == COL_TYPE_FLOAT) { \
-                            for (uint64_t j = ctx->start_row; j <= curr_r; j++) { \
-                                double d_val = (double)(int64_t)ctx->col_buffers[col][j]; \
-                                memcpy(&ctx->col_buffers[col][j], &d_val, 8); \
-                            } \
-                        } else if (new_t == COL_TYPE_STR) { \
-                            ctx->local_types[col] = COL_TYPE_STR; \
-                            restarted = 1; break; \
-                        } \
-                        ctx->local_types[col] = new_t; \
-                        t = new_t; \
-                    } \
-                    if (t == COL_TYPE_INT) { \
-                        int64_t val = 0; type_infer_parse(t, &f, &val, NULL, NULL); \
-                        ctx->col_buffers[col][curr_r] = val; \
-                        if (32 > ctx->max_len[col]) ctx->max_len[col] = 32; \
-                    } else if (t == COL_TYPE_FLOAT) { \
-                        double val = 0.0; type_infer_parse(t, &f, NULL, &val, NULL); \
-                        memcpy(&ctx->col_buffers[col][curr_r], &val, 8); \
-                        if (32 > ctx->max_len[col]) ctx->max_len[col] = 32; \
-                    } else { \
-                        ctx->col_buffers[col][curr_r] = ((uint64_t)fstart << 30) | (fl & 0x3FFFFFFF); \
-                        if (fl > ctx->max_len[col]) ctx->max_len[col] = fl; \
-                    } \
+            } else { \
+                for (uint32_t i = 0; i < batch_row_cnt; i++) { \
+                    uint64_t packed = field_batch[col * BATCH_ROWS + i]; \
+                    size_t fstart = packed >> 30; size_t fl = packed & 0x3FFFFFFF; \
+                    int is_quoted = (fl >= 2 && ctx->buf[fstart] == ctx->quote && ctx->buf[fstart+fl-1] == ctx->quote); \
+                    if (is_quoted) { fstart++; fl -= 2; } \
+                    uint64_t curr_r = ctx->start_row + current_batch_start_row + i; \
+                    if (curr_r >= ctx->end_row) continue; \
+                    uint32_t quoted_bit = is_quoted ? 1 : 0; \
+                    ctx->col_buffers[col][curr_r] = ((uint64_t)fstart << 30) | ((uint64_t)quoted_bit << 29) | fl; \
+                    if (fl > ctx->max_len[col]) ctx->max_len[col] = fl; \
+                    ctx->str_bytes[col] += fl; \
                 } \
             } \
             if (restarted) break; \
         } \
         if (restarted) { \
-            pos = ctx->row_offsets[ctx->start_row]; \
+            pos = ctx->start_pos; \
             current_batch_start_row = 0; \
             batch_row_cnt = 0; \
             c = 0; \
@@ -238,8 +210,7 @@ static void *parse_thread(void *arg) {
             current_batch_start_row += batch_row_cnt; \
             batch_row_cnt = 0; \
         } \
-    } \
-} while(0)
+    } while(0)
 
         while (pos < end_pos || (pos == end_pos && field_start <= end_pos)) {
             if (pos + w <= end_pos) {
@@ -371,12 +342,26 @@ static void *pack_thread_func(void *arg) {
         ctx->offsets[r] = cur_off;
         uint64_t packed = ctx->col_buffer[r];
         uint32_t str_off = (uint32_t)(packed >> 30);
-        uint32_t flen = (uint32_t)(packed & 0x3FFFFFFF);
+        uint32_t is_quoted = (uint32_t)((packed >> 29) & 1);
+        uint32_t flen = (uint32_t)(packed & 0x1FFFFFFF);
         
-        if (flen > 0 && memchr(ctx->buf + str_off, ctx->quote_char, flen) != NULL) {
-            for (uint32_t qi = 0; qi < flen; qi++) {
-                ctx->str_data[cur_off++] = ctx->buf[str_off + qi];
-                if (ctx->buf[str_off + qi] == ctx->quote_char && qi + 1 < flen && ctx->buf[str_off + qi + 1] == ctx->quote_char) qi++;
+        if (is_quoted) {
+            int has_q = 0;
+            if (flen <= 128) {
+                for (uint32_t qi = 0; qi < flen; qi++) {
+                    if (ctx->buf[str_off + qi] == ctx->quote_char) { has_q = 1; break; }
+                }
+            } else {
+                has_q = (memchr(ctx->buf + str_off, ctx->quote_char, flen) != NULL);
+            }
+            if (has_q) {
+                for (uint32_t qi = 0; qi < flen; qi++) {
+                    ctx->str_data[cur_off++] = ctx->buf[str_off + qi];
+                    if (ctx->buf[str_off + qi] == ctx->quote_char && qi + 1 < flen && ctx->buf[str_off + qi + 1] == ctx->quote_char) qi++;
+                }
+            } else {
+                memcpy(ctx->str_data + cur_off, ctx->buf + str_off, flen);
+                cur_off += flen;
             }
         } else {
             memcpy(ctx->str_data + cur_off, ctx->buf + str_off, flen);
@@ -393,7 +378,7 @@ static PyObject *fastcsv_read_csv(PyObject *self, PyObject *args, PyObject *kwds
     const char *delimiter_str = ",";
     int has_header = 1;
     const char *error_mode_str = "strict";
-    int arrow_strings = 0;
+    int arrow_strings = 1;
     
     static char *kwlist[] = {"path", "delimiter", "has_header", "error_mode", "_arrow_strings", NULL};
     if (!PyArg_ParseTupleAndKeywords(args, kwds, "s|spsp", kwlist,
@@ -422,7 +407,8 @@ static PyObject *fastcsv_read_csv(PyObject *self, PyObject *args, PyObject *kwds
     CsvParser *p = NULL;
     PyObject *header_names = NULL;
     PyObject *dict = NULL;
-    size_t *row_offsets = NULL;
+    size_t *part_offsets = NULL;
+    uint64_t *part_rows = NULL;
     uint64_t total_rows = 0;
     uint64_t **col_buffers = NULL;
     ParseThreadCtx *threads = NULL;
@@ -432,8 +418,13 @@ static PyObject *fastcsv_read_csv(PyObject *self, PyObject *args, PyObject *kwds
     ColType *sampled_types = NULL;
     
 #ifdef _WIN32
+    SYSTEM_INFO sysinfo;
+    GetSystemInfo(&sysinfo);
+    nproc = sysinfo.dwNumberOfProcessors;
     HANDLE *handles = NULL;
 #else
+    nproc = (int)sysconf(_SC_NPROCESSORS_ONLN);
+    if (nproc < 1) nproc = 1;
     pthread_t *pthreads = NULL;
 #endif
 
@@ -450,11 +441,12 @@ static PyObject *fastcsv_read_csv(PyObject *self, PyObject *args, PyObject *kwds
         len -= 3;
     }
     
+    struct timespec t0, t1, t2;
     Py_BEGIN_ALLOW_THREADS
-
-
-
-    total_rows = fastcsv_find_row_offsets(buf, len, opts.delimiter, opts.quote_char, &row_offsets);
+    fastcsv_detect_cpu();
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    total_rows = fastcsv_count_rows_and_partitions(buf, len, opts.quote_char, nproc, &part_offsets, &part_rows);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
     Py_END_ALLOW_THREADS
 
     if (total_rows == 0) {
@@ -478,7 +470,10 @@ static PyObject *fastcsv_read_csv(PyObject *self, PyObject *args, PyObject *kwds
             PyList_SET_ITEM(header_names, i, str_obj);
         }
         total_rows--; // header consumed
-        row_offsets++; // advance row_offsets pointer
+        part_offsets[0] = p->pos; // skip header bytes
+        for (int i = 0; i <= nproc; i++) {
+            if (part_rows[i] > 0) part_rows[i]--;
+        }
         header_consumed = 1;
     }
     
@@ -493,33 +488,44 @@ static PyObject *fastcsv_read_csv(PyObject *self, PyObject *args, PyObject *kwds
     for (uint32_t c = 0; c < num_cols; c++) sampled_types[c] = COL_TYPE_INT;
     {
         uint64_t sample_count = (total_rows < 1000) ? total_rows : 1000;
-        uint64_t step = total_rows / sample_count;
-        if (step == 0) step = 1;
-        CsvOptions sample_opts = opts;
-        for (uint64_t s = 0; s < sample_count && s * step < total_rows; s++) {
-            size_t spos = row_offsets[s * step];
-            size_t send = (s * step + 1 < total_rows) ? row_offsets[s * step + 1] : len;
-            /* Trim newlines */
-            while (send > spos && (buf[send-1] == '\n' || buf[send-1] == '\r')) send--;
-            /* Parse fields in this sample row */
-            uint32_t fc = 0;
+        size_t spos = part_offsets[0];
+        
+        for (uint64_t s = 0; s < sample_count; s++) {
+            if (spos >= len) break;
+            
+            int w;
+            uint32_t mask = fastcsv_scan_newlines(buf + spos, opts.quote_char, &w);
+            size_t send = len;
+            if (mask != 0) {
+                int bit = __builtin_ctz(mask);
+                send = spos + bit;
+            } else {
+                for (size_t i = spos; i < len; i++) {
+                    if (buf[i] == '\n' || buf[i] == '\r') { send = i; break; }
+                }
+            }
+            if (send > len) send = len;
+            
+            uint32_t sample_c = 0;
+            int q = 0;
             size_t fstart = spos;
-            int squoted = 0;
             for (size_t i = spos; i <= send; i++) {
-                char ch = (i < send) ? buf[i] : sample_opts.delimiter;
-                if (ch == sample_opts.quote_char) { squoted = !squoted; continue; }
-                if (!squoted && (ch == sample_opts.delimiter || i == send)) {
-                    if (fc < num_cols) {
-                        size_t fs = fstart, fe = i;
-                        /* Strip quotes */
-                        if (fe > fs && buf[fs] == sample_opts.quote_char && buf[fe-1] == sample_opts.quote_char) { fs++; fe--; }
-                        CsvField sf = { .data = buf + fs, .len = (uint32_t)(fe - fs), .quoted = 0 };
-                        type_infer_update(&sampled_types[fc], &sf);
-                        fc++;
+                char ch = (i < send) ? buf[i] : '\n';
+                if (ch == opts.quote_char) q = !q;
+                else if (!q && (ch == opts.delimiter || i == send)) {
+                    if (sample_c < num_cols) {
+                        size_t fl = i - fstart;
+                        int is_quoted = (fl >= 2 && buf[fstart] == opts.quote_char && buf[fstart+fl-1] == opts.quote_char);
+                        if (is_quoted) { fstart++; fl -= 2; }
+                        CsvField f = { .data = buf + fstart, .len = fl, .quoted = is_quoted };
+                        type_infer_update(&sampled_types[sample_c], &f);
                     }
+                    sample_c++;
                     fstart = i + 1;
                 }
             }
+            spos = send + 1;
+            if (spos < len && buf[spos-1] == '\r' && buf[spos] == '\n') spos++;
         }
     }
 
@@ -546,14 +552,16 @@ static PyObject *fastcsv_read_csv(PyObject *self, PyObject *args, PyObject *kwds
     for (int t = 0; t < nproc; t++) {
         threads[t].buf = buf;
         threads[t].len = len;
-        threads[t].row_offsets = row_offsets;
-        threads[t].start_row = t * rows_per_thread;
-        threads[t].end_row = (t == nproc - 1) ? total_rows : (t + 1) * rows_per_thread;
+        threads[t].start_row = part_rows[t];
+        threads[t].end_row = part_rows[t+1];
+        threads[t].start_pos = part_offsets[t];
+        threads[t].end_pos = part_offsets[t+1];
         threads[t].total_rows = total_rows;
         threads[t].col_buffers = col_buffers;
         threads[t].local_types = malloc(num_cols * sizeof(ColType));
         memcpy(threads[t].local_types, sampled_types, num_cols * sizeof(ColType));  /* use sampled types */
         threads[t].max_len = calloc(num_cols, sizeof(uint32_t));
+        threads[t].str_bytes = calloc(num_cols, sizeof(uint64_t));
         threads[t].num_cols = num_cols;
         threads[t].delim = opts.delimiter;
         threads[t].quote = opts.quote_char;
@@ -563,6 +571,7 @@ static PyObject *fastcsv_read_csv(PyObject *self, PyObject *args, PyObject *kwds
     sampled_types = NULL;
 
     Py_BEGIN_ALLOW_THREADS
+    clock_gettime(CLOCK_MONOTONIC, &t1); // Start parse_thread timer
     for (int t = 0; t < nproc; t++) {
 #ifdef _WIN32
         handles[t] = CreateThread(NULL, 0, parse_thread, &threads[t], 0, NULL);
@@ -575,7 +584,12 @@ static PyObject *fastcsv_read_csv(PyObject *self, PyObject *args, PyObject *kwds
 #else
     for (int t = 0; t < nproc; t++) pthread_join(pthreads[t], NULL);
 #endif
+    clock_gettime(CLOCK_MONOTONIC, &t2);
+    // printf("fastcsv_count: %f ms, parse_thread: %f ms\n", (t1.tv_sec - t0.tv_sec)*1000.0 + (t1.tv_nsec - t0.tv_nsec)/1000000.0, (t2.tv_sec - t1.tv_sec)*1000.0 + (t2.tv_nsec - t1.tv_nsec)/1000000.0);
     Py_END_ALLOW_THREADS
+    
+    struct timespec t3;
+    clock_gettime(CLOCK_MONOTONIC, &t3);
 
     ColType *global_types = malloc(num_cols * sizeof(ColType));
     for (uint32_t c = 0; c < num_cols; c++) {
@@ -594,6 +608,14 @@ static PyObject *fastcsv_read_csv(PyObject *self, PyObject *args, PyObject *kwds
                     }
                 }
             }
+        }
+    }
+    
+    PyObject *pa = NULL;
+    for (uint32_t c = 0; c < num_cols; c++) {
+        if (global_types[c] == COL_TYPE_STR) {
+            pa = PyImport_ImportModule("pyarrow");
+            break;
         }
     }
     
@@ -628,10 +650,7 @@ static PyObject *fastcsv_read_csv(PyObject *self, PyObject *args, PyObject *kwds
                 uint64_t t_end = threads[t].end_row;
                 if (t_end > total_rows) t_end = total_rows;
                 
-                uint64_t bytes = 0;
-                for (uint64_t r = t_start; r < t_end; r++) {
-                    bytes += (uint32_t)(col_buffers[c][r] & 0x3FFFFFFF);
-                }
+                uint64_t bytes = threads[t].str_bytes[c];
                 thread_start_offsets[t] = total_str_bytes;
                 total_str_bytes += bytes;
             }
@@ -739,6 +758,7 @@ cleanup:
         for (int t = 0; t < nproc; t++) {
             if (threads[t].local_types) free(threads[t].local_types);
             if (threads[t].max_len) free(threads[t].max_len);
+            if (threads[t].str_bytes) free(threads[t].str_bytes);
         }
         free(threads);
     }
@@ -754,9 +774,18 @@ cleanup:
         free(col_buffers);
     }
     if (sampled_types) free(sampled_types);
-    if (header_consumed && row_offsets) row_offsets--; // restore pointer for free
-    if (row_offsets) free(row_offsets);
+    if (part_offsets) free(part_offsets);
+    if (part_rows) free(part_rows);
     if (p) csv_parser_free(p);
+    
+    struct timespec t4;
+    clock_gettime(CLOCK_MONOTONIC, &t4);
+    printf("fastcsv_count: %f ms, parse_thread: %f ms, numpy/pyarrow: %f ms, total: %f ms\n", 
+           (t1.tv_sec - t0.tv_sec)*1000.0 + (t1.tv_nsec - t0.tv_nsec)/1000000.0, 
+           (t2.tv_sec - t1.tv_sec)*1000.0 + (t2.tv_nsec - t1.tv_nsec)/1000000.0,
+           (t4.tv_sec - t3.tv_sec)*1000.0 + (t4.tv_nsec - t3.tv_nsec)/1000000.0,
+           (t4.tv_sec - t0.tv_sec)*1000.0 + (t4.tv_nsec - t0.tv_nsec)/1000000.0);
+           
     Py_XDECREF(header_names);
     return dict;
 }

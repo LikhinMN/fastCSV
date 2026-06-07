@@ -244,7 +244,18 @@ fastcsv_parse_int_fast(const char *s, size_t len, int *ok)
         return neg ? -(int64_t)val : (int64_t)val;
     }
 
-    /* Validate all characters are digits. */
+    if (dlen <= 8) {
+        uint64_t val = 0;
+        for (size_t i = 0; i < dlen; i++) {
+            unsigned d = (unsigned)(digits[i] - '0');
+            if (d > 9) { return 0; }
+            val = val * 10 + d;
+        }
+        *ok = 1;
+        return neg ? -(int64_t)val : (int64_t)val;
+    }
+
+    /* Validate all characters are digits for longer strings. */
     if (!fastcsv_all_digits(digits, dlen))
         return 0;
 
