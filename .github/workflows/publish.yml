@@ -20,9 +20,10 @@ jobs:
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.17.0
         env:
-          CIBW_TEST_REQUIRES: pytest numpy
-          # Run the test suite against the built wheel
-          CIBW_TEST_COMMAND: "pytest {project}/tests"
+          CIBW_SKIP: "pp* *i686 *musllinux* *win32"
+          CIBW_TEST_REQUIRES: numpy pyarrow
+          # Run the test scripts directly since they are not pytest modules
+          CIBW_TEST_COMMAND: "python {project}/tests/test_final.py && python {project}/tests/test_python.py && python {project}/tests/test_robustness.py"
 
       - uses: actions/upload-artifact@v4
         with:
