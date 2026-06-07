@@ -31,7 +31,7 @@ os.unlink(p)
 p = csv("x\n1\n2\n3\n")
 r = fastcsv.read_csv(p)
 test("int dtype", r['x'].dtype == np.int64)
-test("int values", list(r['x']) == [1, 2, 3])
+test("int values", [str(x) if hasattr(x, "as_py") else x for x in r['x']] == [1, 2, 3])
 os.unlink(p)
 
 # float column
@@ -43,7 +43,7 @@ os.unlink(p)
 # str column
 p = csv("x\nhello\nworld\n")
 r = fastcsv.read_csv(p)
-test("str values", list(r['x']) == ['hello', 'world'])
+test("str values", [str(x) if hasattr(x, "as_py") else x for x in r['x']] == ['hello', 'world'])
 os.unlink(p)
 
 # mixed downgrades to float
@@ -62,19 +62,19 @@ os.unlink(p)
 # tab delimiter
 p = csv("a\tb\n1\t2\n")
 r = fastcsv.read_csv(p, delimiter='\t')
-test("tab delimiter", list(r['a']) == [1])
+test("tab delimiter", [str(x) if hasattr(x, "as_py") else x for x in r['a']] == [1])
 os.unlink(p)
 
 # quoted field
 p = csv('a\n"hello, world"\n')
 r = fastcsv.read_csv(p)
-test("quoted field with comma", r['a'][0] == 'hello, world')
+test("quoted field with comma", str(r['a'][0]) == 'hello, world')
 os.unlink(p)
 
 # embedded newline
 p = csv('a\n"line1\nline2"\n')
 r = fastcsv.read_csv(p)
-test("embedded newline in field", r['a'][0] == 'line1\nline2')
+test("embedded newline in field", str(r['a'][0]) == 'line1\nline2')
 os.unlink(p)
 
 # BOM

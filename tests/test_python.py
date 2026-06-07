@@ -15,7 +15,7 @@ r = fastcsv.read_csv(p)
 test("read_csv: returns dict", isinstance(r, dict))
 test("read_csv: 3 keys", len(r) == 3)
 test("read_csv: col a dtype int", r['a'].dtype == np.int64)
-test("read_csv: col a values", list(r['a']) == [1, 4])
+test("read_csv: col a values", [str(x) if hasattr(x, "as_py") else x for x in r['a']] == [1, 4])
 os.unlink(p)
 
 # no header
@@ -33,7 +33,7 @@ os.unlink(p)
 # string column
 p = write_csv("name\nalice\nbob\n")
 r = fastcsv.read_csv(p)
-test("str col values", list(r['name']) == ['alice', 'bob'])
+test("str col values", [str(x) if hasattr(x, "as_py") else x for x in r['name']] == ['alice', 'bob'])
 os.unlink(p)
 
 # reader iterator

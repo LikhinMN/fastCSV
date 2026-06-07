@@ -74,7 +74,7 @@ os.unlink(p)
 inner = "line1\nline2\nline3"
 p = write_csv(f'text\n"{inner}"\n')
 r = fastcsv.read_csv(p)
-test("multiline quoted field: correct value", r['text'][0] == inner)
+test("multiline quoted field: correct value", str(r['text'][0]) == inner)
 os.unlink(p)
 
 print("Done.")
