@@ -60,7 +60,7 @@ static uint32_t scan_scalar(const char *buf, char delim, char quote) {
 
 /* --- public API --- */
 
-#if defined(_MSC_VER)
+#if defined(_MSC_VER) && (defined(__x86_64__) || defined(_M_X64))
 #include <intrin.h>
 static int fastcsv_cpu_supports_avx2(void) {
     int cpuInfo[4];
@@ -72,13 +72,33 @@ static int fastcsv_cpu_supports_sse42(void) {
     __cpuid(cpuInfo, 1);
     return (cpuInfo[2] & (1 << 20)) != 0;
 }
-#else
+#elif defined(__x86_64__) && !defined(__APPLE__)
+/* GCC/Linux: __builtin_cpu_supports is available */
 static int fastcsv_cpu_supports_avx2(void) {
     return __builtin_cpu_supports("avx2");
 }
 static int fastcsv_cpu_supports_sse42(void) {
     return __builtin_cpu_supports("sse4.2");
 }
+#elif defined(__x86_64__) && defined(__APPLE__)
+/* Apple Clang on x86_64: use cpuid inline asm */
+#include <cpuid.h>
+static int fastcsv_cpu_supports_avx2(void) {
+    unsigned int eax, ebx, ecx, edx;
+    if (__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx))
+        return (ebx & (1 << 5)) != 0;
+    return 0;
+}
+static int fastcsv_cpu_supports_sse42(void) {
+    unsigned int eax, ebx, ecx, edx;
+    if (__get_cpuid(1, &eax, &ebx, &ecx, &edx))
+        return (ecx & (1 << 20)) != 0;
+    return 0;
+}
+#else
+/* ARM64 / other: no x86 SIMD, stubs return 0 */
+static int fastcsv_cpu_supports_avx2(void)  { return 0; }
+static int fastcsv_cpu_supports_sse42(void) { return 0; }
 #endif
 
 void fastcsv_detect_cpu(void) {
