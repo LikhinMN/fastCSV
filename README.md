@@ -7,9 +7,9 @@ memory-mapped I/O, and zero-copy columnar NumPy output.
 
 | File             | fastcsv  | pandas   | polars   |
 |------------------|----------|----------|----------|
-| 1M rows mixed    | 0.041s   | 1.080s   | 0.033s   |
-| 100k rows wide   | 0.026s   | 0.381s   | 0.034s   |
-| 500k rows str    | 0.018s   | 0.956s   | 0.015s   |
+| 1M rows mixed    | 0.053s   | 1.086s   | 0.034s   |
+| 100k rows wide   | 0.027s   | 0.380s   | 0.033s   |
+| 500k rows str    | 0.020s   | 0.935s   | 0.015s   |
 
 Hardware: AMD Ryzen 5 7235HS
 

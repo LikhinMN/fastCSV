@@ -16,6 +16,6 @@ OS:       Linux fedora 7.0.10-101.fc43.x86_64
 
 | File            | fastcsv  | pandas   | polars   |
 |-----------------|----------|----------|----------|
-| 1M rows mixed   | 0.465s   | 0.962s   | 0.029s   |
-| 100k rows wide  | 0.406s   | 0.403s   | 0.034s   |
-| 500k rows str   | 0.192s   | 0.834s   | 0.012s   |
+| 1M rows mixed   | 0.053s   | 1.086s   | 0.034s   |
+| 100k rows wide  | 0.027s   | 0.380s   | 0.033s   |
+| 500k rows str   | 0.020s   | 0.935s   | 0.015s   |

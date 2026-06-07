@@ -49,7 +49,7 @@ os.unlink(p)
 # mixed downgrades to float
 p = csv("x\n1\n2.5\n3\n")
 r = fastcsv.read_csv(p)
-test("int+float → float64", r['x'].dtype == np.float64)
+test("int+float -> float64", r['x'].dtype == np.float64)
 os.unlink(p)
 
 # no header
