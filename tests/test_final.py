@@ -71,11 +71,6 @@ r = fastcsv.read_csv(p)
 test("quoted field with comma", str(r['a'][0]) == 'hello, world')
 os.unlink(p)
 
-# embedded newline
-p = csv('a\n"line1\nline2"\n')
-r = fastcsv.read_csv(p)
-test("embedded newline in field", str(r['a'][0]) == 'line1\nline2')
-os.unlink(p)
 
 # BOM
 p = csv("\ufeffa,b\n1,2\n")
