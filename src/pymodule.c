@@ -780,12 +780,7 @@ cleanup:
     
     struct timespec t4;
     clock_gettime(CLOCK_MONOTONIC, &t4);
-    printf("fastcsv_count: %f ms, parse_thread: %f ms, numpy/pyarrow: %f ms, total: %f ms\n", 
-           (t1.tv_sec - t0.tv_sec)*1000.0 + (t1.tv_nsec - t0.tv_nsec)/1000000.0, 
-           (t2.tv_sec - t1.tv_sec)*1000.0 + (t2.tv_nsec - t1.tv_nsec)/1000000.0,
-           (t4.tv_sec - t3.tv_sec)*1000.0 + (t4.tv_nsec - t3.tv_nsec)/1000000.0,
-           (t4.tv_sec - t0.tv_sec)*1000.0 + (t4.tv_nsec - t0.tv_nsec)/1000000.0);
-           
+    
     Py_XDECREF(header_names);
     return dict;
 }
