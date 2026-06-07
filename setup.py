@@ -13,7 +13,6 @@ class BuildExt(build_ext):
                 ext.extra_compile_args = [
                     '-O3', '-std=c11', '-DNDEBUG',
                     '-Wall', '-Wextra',
-                    '-march=native',
                     '-funroll-loops',
                     '-fno-math-errno',
                     '-fomit-frame-pointer',
