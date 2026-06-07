@@ -446,9 +446,14 @@ static PyObject *fastcsv_read_csv(PyObject *self, PyObject *args, PyObject *kwds
     Py_BEGIN_ALLOW_THREADS
     fastcsv_detect_cpu();
     clock_gettime(CLOCK_MONOTONIC, &t0);
-    total_rows = fastcsv_count_rows_and_partitions(buf, len, opts.quote_char, nproc, &part_offsets, &part_rows);
+    total_rows = fastcsv_count_rows_and_partitions(buf, len, opts.quote_char, nproc, opts.error_mode, &part_offsets, &part_rows);
     clock_gettime(CLOCK_MONOTONIC, &t1);
     Py_END_ALLOW_THREADS
+
+    if (total_rows == (uint64_t)-1) {
+        set_csv_error(CSV_ERR_MALFORMED);
+        goto cleanup;
+    }
 
     if (total_rows == 0) {
         dict = PyDict_New();

@@ -311,7 +311,7 @@ int csv_next_row(CsvParser *p, CsvRow *out) {
     }
 }
 
-uint64_t fastcsv_count_rows_and_partitions(const char *buf, size_t len, char quote, int nproc, size_t **out_part_offsets, uint64_t **out_part_rows) {
+uint64_t fastcsv_count_rows_and_partitions(const char *buf, size_t len, char quote, int nproc, CsvErrorMode err_mode, size_t **out_part_offsets, uint64_t **out_part_rows) {
     size_t *p_offsets = malloc((nproc + 1) * sizeof(size_t));
     uint64_t *p_rows = malloc((nproc + 1) * sizeof(uint64_t));
     
@@ -323,41 +323,53 @@ uint64_t fastcsv_count_rows_and_partitions(const char *buf, size_t len, char quo
     
     size_t target_chunk = len / nproc;
     int current_part = 1;
+    size_t next_chunk_boundary = target_chunk;
     
     int w = fastcsv_simd_width();
     int quoted = 0;
     
     while (pos < len) {
-        if (pos + w <= len) {
+        if (pos + w <= len && !quoted) {
             int width;
-            uint32_t mask = fastcsv_scan_newlines(buf + pos, quote, &width);
+            uint32_t mask = fastcsv_scan_chunk(buf + pos, '\n', quote, &width);
             if (mask == 0) { pos += width; continue; }
             while (mask != 0) {
                 int bit = __builtin_ctz(mask);
                 char c = buf[pos + bit];
-                quoted ^= (c == quote);
-                if (!quoted && c == '\n') {
+                if (c == quote) {
+                    quoted = 1;
+                    pos += bit + 1;
+                    goto in_quote_fallback;
+                } else if (c == '\n') {
                     count++;
                     size_t nl_pos = pos + bit + 1;
-                    if (current_part < nproc && nl_pos >= current_part * target_chunk) {
-                        p_offsets[current_part] = nl_pos;
-                        p_rows[current_part] = count;
-                        current_part++;
+                    if (current_part < nproc && nl_pos >= next_chunk_boundary) {
+                        while (current_part < nproc && nl_pos >= next_chunk_boundary) {
+                            p_offsets[current_part] = nl_pos;
+                            p_rows[current_part] = count;
+                            current_part++;
+                            next_chunk_boundary = current_part * target_chunk;
+                        }
                     }
                 }
                 mask &= mask - 1;
             }
             pos += width;
         } else {
+in_quote_fallback:
+            if (pos >= len) break;
             char c = buf[pos];
             if (c == quote) quoted = !quoted;
             else if (!quoted && c == '\n') {
                 count++;
                 size_t nl_pos = pos + 1;
-                if (current_part < nproc && nl_pos >= current_part * target_chunk) {
-                    p_offsets[current_part] = nl_pos;
-                    p_rows[current_part] = count;
-                    current_part++;
+                if (current_part < nproc && nl_pos >= next_chunk_boundary) {
+                    while (current_part < nproc && nl_pos >= next_chunk_boundary) {
+                        p_offsets[current_part] = nl_pos;
+                        p_rows[current_part] = count;
+                        current_part++;
+                        next_chunk_boundary = current_part * target_chunk;
+                    }
                 }
             } else if (!quoted && c == '\r') {
                 size_t nl_pos = pos + 1;
@@ -365,10 +377,13 @@ uint64_t fastcsv_count_rows_and_partitions(const char *buf, size_t len, char quo
                     // skip, wait for \n
                 } else {
                     count++;
-                    if (current_part < nproc && nl_pos >= current_part * target_chunk) {
-                        p_offsets[current_part] = nl_pos;
-                        p_rows[current_part] = count;
-                        current_part++;
+                    if (current_part < nproc && nl_pos >= next_chunk_boundary) {
+                        while (current_part < nproc && nl_pos >= next_chunk_boundary) {
+                            p_offsets[current_part] = nl_pos;
+                            p_rows[current_part] = count;
+                            current_part++;
+                            next_chunk_boundary = current_part * target_chunk;
+                        }
                     }
                 }
             }
@@ -384,5 +399,8 @@ uint64_t fastcsv_count_rows_and_partitions(const char *buf, size_t len, char quo
     
     *out_part_offsets = p_offsets;
     *out_part_rows = p_rows;
+    if (quoted && err_mode == CSV_ON_ERROR_STRICT) {
+        return (uint64_t)-1;
+    }
     return count;
 }

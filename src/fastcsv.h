@@ -41,6 +41,7 @@ typedef struct {
 typedef struct CsvParser CsvParser;
 
 CsvOptions  csv_default_options(void);
+uint64_t    fastcsv_count_rows_and_partitions(const char *buf, size_t len, char quote, int nproc, CsvErrorMode err_mode, size_t **out_part_offsets, uint64_t **out_part_rows);
 CsvParser  *csv_parser_new(const char *buf, size_t len, CsvOptions opts);
 CsvParser  *csv_parser_from_file(const char *path, CsvOptions opts);
 int         csv_next_row(CsvParser *p, CsvRow *out);
