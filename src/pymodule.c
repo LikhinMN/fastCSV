@@ -218,7 +218,7 @@ static void *parse_thread(void *arg) {
                 uint32_t mask = fastcsv_scan_chunk(ctx->buf + pos, ctx->delim, ctx->quote, &width);
                 if (mask == 0) { pos += width; continue; }
                 while (mask != 0) {
-                    int bit = __builtin_ctz(mask);
+                    int bit = fastcsv_ctz(mask);
                     if (pos + bit >= end_pos) {
                         pos = end_pos;
                         break;
@@ -442,12 +442,9 @@ static PyObject *fastcsv_read_csv(PyObject *self, PyObject *args, PyObject *kwds
         len -= 3;
     }
     
-    struct timespec t0, t1, t2;
     Py_BEGIN_ALLOW_THREADS
     fastcsv_detect_cpu();
-    clock_gettime(CLOCK_MONOTONIC, &t0);
     total_rows = fastcsv_count_rows_and_partitions(buf, len, opts.quote_char, nproc, opts.error_mode, &part_offsets, &part_rows);
-    clock_gettime(CLOCK_MONOTONIC, &t1);
     Py_END_ALLOW_THREADS
 
     if (total_rows == (uint64_t)-1) {
@@ -503,7 +500,7 @@ static PyObject *fastcsv_read_csv(PyObject *self, PyObject *args, PyObject *kwds
             uint32_t mask = fastcsv_scan_newlines(buf + spos, opts.quote_char, &w);
             size_t send = len;
             if (mask != 0) {
-                int bit = __builtin_ctz(mask);
+                int bit = fastcsv_ctz(mask);
                 send = spos + bit;
             } else {
                 for (size_t i = spos; i < len; i++) {
@@ -580,7 +577,6 @@ static PyObject *fastcsv_read_csv(PyObject *self, PyObject *args, PyObject *kwds
     sampled_types = NULL;
 
     Py_BEGIN_ALLOW_THREADS
-    clock_gettime(CLOCK_MONOTONIC, &t1); // Start parse_thread timer
     for (int t = 0; t < nproc; t++) {
 #ifdef _WIN32
         handles[t] = CreateThread(NULL, 0, parse_thread, &threads[t], 0, NULL);
@@ -593,13 +589,8 @@ static PyObject *fastcsv_read_csv(PyObject *self, PyObject *args, PyObject *kwds
 #else
     for (int t = 0; t < nproc; t++) pthread_join(pthreads[t], NULL);
 #endif
-    clock_gettime(CLOCK_MONOTONIC, &t2);
-    // printf("fastcsv_count: %f ms, parse_thread: %f ms\n", (t1.tv_sec - t0.tv_sec)*1000.0 + (t1.tv_nsec - t0.tv_nsec)/1000000.0, (t2.tv_sec - t1.tv_sec)*1000.0 + (t2.tv_nsec - t1.tv_nsec)/1000000.0);
     Py_END_ALLOW_THREADS
     
-    struct timespec t3;
-    clock_gettime(CLOCK_MONOTONIC, &t3);
-
     ColType *global_types = malloc(num_cols * sizeof(ColType));
     for (uint32_t c = 0; c < num_cols; c++) {
         global_types[c] = COL_TYPE_INT;

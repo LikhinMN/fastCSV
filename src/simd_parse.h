@@ -18,6 +18,8 @@
 #include <stddef.h>
 #include <string.h>
 
+#include "fastcsv.h"
+
 /* ------------------------------------------------------------------ */
 /*  Platform detection                                                 */
 /* ------------------------------------------------------------------ */
@@ -68,7 +70,7 @@ fastcsv_parse_uint_scalar(const char *s, size_t len)
  *   3. _mm_madd_epi16    with {100,1,…}    → 2 × 32-bit values
  *   4. Combine: hi * 10000 + lo
  */
-__attribute__((target("ssse3")))
+FASTCSV_TARGET_SSSE3
 static inline uint64_t
 fastcsv_ssse3_8digits(const uint8_t buf8[8])
 {
@@ -120,7 +122,7 @@ fastcsv_ssse3_8digits(const uint8_t buf8[8])
  *
  * Caller validates digits and bounds before calling.
  */
-__attribute__((target("ssse3")))
+FASTCSV_TARGET_SSSE3
 static inline uint64_t
 fastcsv_parse_uint_ssse3(const char *s, size_t len)
 {

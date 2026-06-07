@@ -4,6 +4,23 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#ifdef _MSC_VER
+#include <intrin.h>
+static inline int fastcsv_ctz(uint32_t mask) {
+    unsigned long index;
+    _BitScanForward(&index, mask);
+    return (int)index;
+}
+#define FASTCSV_TARGET_AVX2
+#define FASTCSV_TARGET_SSE42
+#define FASTCSV_TARGET_SSSE3
+#else
+#define fastcsv_ctz(mask) __builtin_ctz((uint32_t)(mask))
+#define FASTCSV_TARGET_AVX2 __attribute__((target("avx2")))
+#define FASTCSV_TARGET_SSE42 __attribute__((target("sse4.2")))
+#define FASTCSV_TARGET_SSSE3 __attribute__((target("ssse3")))
+#endif
+
 typedef enum {
     CSV_OK            =  0,
     CSV_ERR_OOM       = -1,

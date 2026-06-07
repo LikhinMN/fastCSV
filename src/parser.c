@@ -136,7 +136,7 @@ int csv_next_row(CsvParser *p, CsvRow *out) {
                 p->pos += width;
                 continue;
             } else {
-                int bit = __builtin_ctz(mask);
+                int bit = fastcsv_ctz(mask);
                 if (state == FIELD_START && bit > 0) {
                     start = p->pos;
                     state = UNQUOTED;
