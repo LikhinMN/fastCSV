@@ -38,7 +38,7 @@ ext = Extension(
 )
 
 setup(
-    name="fastcsv",
+    name="fastcsv-python",
     version="0.1.0",
     description="Fast CSV parsing for Python via C + SIMD",
     long_description=open("README.md").read(),

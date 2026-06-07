@@ -15,7 +15,7 @@ Hardware: AMD Ryzen 5 7235HS
 
 ## Installation
 
-    pip install fastcsv
+    pip install fastcsv-python
 
 ## Usage
 
